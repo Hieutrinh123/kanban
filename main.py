@@ -22,7 +22,7 @@ database.init_db()
 
 
 @app.get("/api/browse")
-async def browse_file():
+async def browse_file(mode: str = "file"):
     if not tk:
         raise HTTPException(500, "Tkinter not installed/available")
     
@@ -31,7 +31,10 @@ async def browse_file():
         root = tk.Tk()
         root.withdraw()
         root.attributes("-topmost", True)
-        path = filedialog.askopenfilename()
+        if mode == "folder":
+            path = filedialog.askdirectory()
+        else:
+            path = filedialog.askopenfilename()
         root.destroy()
         return path
 
