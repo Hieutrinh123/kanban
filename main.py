@@ -404,8 +404,8 @@ def create_comment(card_id: int, body: CommentCreate, background_tasks: Backgrou
             raise HTTPException(404, "Card not found")
         has_at_claude = 1 if "@claude" in body.text.lower() else 0
         cur = conn.execute(
-            "INSERT INTO comments (card_id, author, text, has_at_claude) VALUES (?,?,?,?)",
-            (card_id, "user", body.text, has_at_claude),
+            "INSERT INTO comments (card_id, author, text, has_at_claude, reply_to_id) VALUES (?,?,?,?,?)",
+            (card_id, "user", body.text, has_at_claude, body.reply_to_id),
         )
         conn.commit()
         comment = dict(conn.execute("SELECT * FROM comments WHERE id=?", (cur.lastrowid,)).fetchone())
@@ -442,7 +442,7 @@ def delete_comment(comment_id: int):
 
 # ── Claude reply background task ──────────────────────────────────────────────
 
-def _build_claude_prompt(card: dict, comment_text: str) -> str:
+def _build_claude_prompt(card: dict, comment_text: str, parent_text: str = None) -> str:
     lines = [
         "You are an AI assistant embedded in a Kanban board. Respond concisely and helpfully.",
         "",
@@ -456,6 +456,7 @@ def _build_claude_prompt(card: dict, comment_text: str) -> str:
     if card.get("due_date"):
         lines.append(f"**Due:** {card['due_date']}")
 
+    # ... (same checklist logic) ...
     # Fetch and include checklist items
     conn = database.get_db()
     try:
@@ -493,9 +494,12 @@ def _build_claude_prompt(card: dict, comment_text: str) -> str:
                 lines.append(f"\n## Referenced File Error")
                 lines.append(f"Could not read {fpath.name}: {str(e)}")
 
+    if parent_text:
+        lines += ["", "## Discussion Context (Previous Comment)", parent_text]
+
     lines += [
         "",
-        "## Comment",
+        "## Current Comment",
         comment_text,
         "",
         "## Instruction",
@@ -527,7 +531,19 @@ async def claude_reply(card_id: int, card: dict, comment_text: str, trigger_comm
             "3. Or, if you use a different name/path, update `_claude_cmd` in `main.py`."
         )
     else:
-        prompt = _build_claude_prompt(card, comment_text)
+        # Fetch parent context if this is a reply
+        conn = database.get_db()
+        parent_text = None
+        try:
+            trigger_cmt = conn.execute("SELECT reply_to_id FROM comments WHERE id=?", (trigger_comment_id,)).fetchone()
+            if trigger_cmt and trigger_cmt["reply_to_id"]:
+                parent = conn.execute("SELECT text FROM comments WHERE id=?", (trigger_cmt["reply_to_id"],)).fetchone()
+                if parent:
+                    parent_text = parent["text"]
+        finally:
+            conn.close()
+
+        prompt = _build_claude_prompt(card, comment_text, parent_text)
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
