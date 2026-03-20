@@ -773,7 +773,7 @@ function buildColumn(col) {
     <div class="cards-wrap" id="cw-${col.id}"></div>
   `;
 
-  wrap.querySelector('.btn-add').addEventListener('click', () => openDetail(col.id, null));
+  wrap.querySelector('.btn-add').addEventListener('click', async () => await openDetail(col.id, null));
 
   const cw = wrap.querySelector(`#cw-${col.id}`);
 
@@ -910,7 +910,7 @@ function buildCard(card, colId) {
     </div>
   `;
 
-  el.addEventListener('click', () => openDetail(colId, card));
+  el.addEventListener('click', async () => await openDetail(colId, card));
 
   el.addEventListener('dragstart', e => {
     dragId   = card.id;
@@ -1069,16 +1069,30 @@ document.getElementById('btn-sort').addEventListener('click', e => {
 });
 
 // ─── Detail Panel ────────────────────────────────────────────────────────────
-function openDetail(colId, card) {
+async function openDetail(colId, card) {
+  let fullCard = card;
+  if (card && card.id) {
+    try {
+      const updated = await api(`/cards/${card.id}`);
+      fullCard = { ...updated, dueDate: updated.due_date, id: String(updated.id) };
+      
+      // Update local data so the board and panel stay in sync
+      const idx = data[colId].findIndex(c => String(c.id) === String(card.id));
+      if (idx !== -1) data[colId][idx] = fullCard;
+    } catch (e) {
+      console.error('Failed to fetch card details:', e);
+    }
+  }
+
   detailColId = colId;
-  detailCardId = card ? card.id : null;
+  detailCardId = fullCard ? fullCard.id : null;
 
   // Close archive panel
   document.getElementById('archive-panel').classList.remove('open');
 
-  renderDetailHead(colId, card);
-  renderDetailBody(colId, card);
-  renderDetailFooter(colId, card);
+  renderDetailHead(colId, fullCard);
+  renderDetailBody(colId, fullCard);
+  renderDetailFooter(colId, fullCard);
 
   document.getElementById('detail-panel').classList.add('open');
   document.getElementById('panel-overlay').classList.add('open');
