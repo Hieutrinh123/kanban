@@ -1,0 +1,496 @@
+from __future__ import annotations
+
+import asyncio
+import shutil
+import sys
+from typing import List, Optional
+
+from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+import database
+
+app = FastAPI(title="Kanban Board")
+database.init_db()
+
+
+# ── Pydantic models ───────────────────────────────────────────────────────────
+
+class CardCreate(BaseModel):
+    title: str
+    column_id: int
+    description: str = ""
+    due_date: Optional[str] = None
+    priority: str = "none"
+    project: Optional[str] = None
+    assignee: Optional[str] = None
+
+
+class CardUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    due_date: Optional[str] = None
+    priority: Optional[str] = None
+    project: Optional[str] = None
+    assignee: Optional[str] = None
+
+
+class CardMove(BaseModel):
+    column_id: int
+    source_column_id: int
+    source_ids: List[int]
+    target_ids: List[int]
+
+
+class CardArchive(BaseModel):
+    archived: bool
+
+
+class ChecklistCreate(BaseModel):
+    title: str = "Checklist"
+
+
+class ChecklistItemCreate(BaseModel):
+    text: str
+    assignee: Optional[str] = None
+
+
+class ChecklistItemUpdate(BaseModel):
+    text: Optional[str] = None
+    completed: Optional[bool] = None
+    assignee: Optional[str] = None
+
+
+class CommentCreate(BaseModel):
+    text: str
+    author: str = "user"
+
+
+class CommentUpdate(BaseModel):
+    text: str
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def get_card_full(conn, card_id: int):
+    card = conn.execute("SELECT * FROM cards WHERE id=?", (card_id,)).fetchone()
+    if not card:
+        return None
+    card = dict(card)
+    checklists = conn.execute(
+        "SELECT * FROM checklists WHERE card_id=? ORDER BY position", (card_id,)
+    ).fetchall()
+    card["checklists"] = []
+    for cl in checklists:
+        cl = dict(cl)
+        items = conn.execute(
+            "SELECT * FROM checklist_items WHERE checklist_id=? ORDER BY position",
+            (cl["id"],),
+        ).fetchall()
+        cl["items"] = [dict(i) for i in items]
+        card["checklists"].append(cl)
+    comments = conn.execute(
+        "SELECT * FROM comments WHERE card_id=? ORDER BY created_at, id",
+        (card_id,),
+    ).fetchall()
+    card["comments"] = [dict(c) for c in comments]
+    return card
+
+
+# ── Board ─────────────────────────────────────────────────────────────────────
+
+@app.get("/api/board")
+def get_board():
+    conn = database.get_db()
+    try:
+        columns = conn.execute("SELECT * FROM columns ORDER BY position").fetchall()
+        result = []
+        for col in columns:
+            col = dict(col)
+            cards = conn.execute(
+                """
+                SELECT c.*,
+                    (SELECT COUNT(*) FROM checklist_items ci
+                     JOIN checklists cl ON ci.checklist_id = cl.id
+                     WHERE cl.card_id = c.id) AS total_items,
+                    (SELECT COUNT(*) FROM checklist_items ci
+                     JOIN checklists cl ON ci.checklist_id = cl.id
+                     WHERE cl.card_id = c.id AND ci.completed = 1) AS completed_items,
+                    (SELECT COUNT(*) FROM comments cm WHERE cm.card_id = c.id) AS comment_count
+                FROM cards c
+                WHERE c.column_id = ? AND c.archived = 0
+                ORDER BY c.position
+                """,
+                (col["id"],),
+            ).fetchall()
+            col["cards"] = [dict(c) for c in cards]
+            result.append(col)
+        return result
+    finally:
+        conn.close()
+
+
+# ── Cards ─────────────────────────────────────────────────────────────────────
+
+@app.post("/api/cards", status_code=201)
+def create_card(body: CardCreate):
+    conn = database.get_db()
+    try:
+        max_pos = conn.execute(
+            "SELECT COALESCE(MAX(position), -1) FROM cards WHERE column_id=? AND archived=0",
+            (body.column_id,),
+        ).fetchone()[0]
+        cur = conn.execute(
+            "INSERT INTO cards (title, description, column_id, position, due_date, priority, project, assignee) VALUES (?,?,?,?,?,?,?,?)",
+            (body.title, body.description, body.column_id, max_pos + 1, body.due_date, body.priority, body.project, body.assignee),
+        )
+        conn.commit()
+        return get_card_full(conn, cur.lastrowid)
+    finally:
+        conn.close()
+
+
+@app.get("/api/cards/{card_id}")
+def get_card(card_id: int):
+    conn = database.get_db()
+    try:
+        card = get_card_full(conn, card_id)
+        if not card:
+            raise HTTPException(404, "Card not found")
+        return card
+    finally:
+        conn.close()
+
+
+@app.patch("/api/cards/{card_id}")
+def update_card(card_id: int, body: CardUpdate):
+    conn = database.get_db()
+    try:
+        card = conn.execute("SELECT * FROM cards WHERE id=?", (card_id,)).fetchone()
+        if not card:
+            raise HTTPException(404, "Card not found")
+        updates = {k: v for k, v in body.model_dump().items() if k in body.model_fields_set}
+        if not updates:
+            return get_card_full(conn, card_id)
+        set_parts = [f"{k}=?" for k in updates]
+        set_parts.append("updated_at=datetime('now')")
+        values = list(updates.values()) + [card_id]
+        conn.execute(f"UPDATE cards SET {', '.join(set_parts)} WHERE id=?", values)
+        conn.commit()
+        return get_card_full(conn, card_id)
+    finally:
+        conn.close()
+
+
+@app.delete("/api/cards/{card_id}", status_code=204)
+def delete_card(card_id: int):
+    conn = database.get_db()
+    try:
+        conn.execute("DELETE FROM cards WHERE id=?", (card_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@app.post("/api/cards/{card_id}/move")
+def move_card(card_id: int, body: CardMove):
+    conn = database.get_db()
+    try:
+        for pos, cid in enumerate(body.source_ids):
+            conn.execute("UPDATE cards SET position=? WHERE id=?", (pos, cid))
+        for pos, cid in enumerate(body.target_ids):
+            conn.execute(
+                "UPDATE cards SET column_id=?, position=?, updated_at=datetime('now') WHERE id=?",
+                (body.column_id, pos, cid),
+            )
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+@app.patch("/api/cards/{card_id}/archive")
+def archive_card(card_id: int, body: CardArchive):
+    conn = database.get_db()
+    try:
+        conn.execute(
+            "UPDATE cards SET archived=?, updated_at=datetime('now') WHERE id=?",
+            (1 if body.archived else 0, card_id),
+        )
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+# ── Archive ───────────────────────────────────────────────────────────────────
+
+@app.get("/api/archive")
+def get_archive():
+    conn = database.get_db()
+    try:
+        cards = conn.execute(
+            """
+            SELECT c.*, col.name AS column_name
+            FROM cards c
+            JOIN columns col ON c.column_id = col.id
+            WHERE c.archived = 1
+            ORDER BY c.updated_at DESC
+            """
+        ).fetchall()
+        return [dict(c) for c in cards]
+    finally:
+        conn.close()
+
+
+# ── Checklists ────────────────────────────────────────────────────────────────
+
+@app.post("/api/cards/{card_id}/checklists", status_code=201)
+def create_checklist(card_id: int, body: ChecklistCreate):
+    conn = database.get_db()
+    try:
+        max_pos = conn.execute(
+            "SELECT COALESCE(MAX(position), -1) FROM checklists WHERE card_id=?", (card_id,)
+        ).fetchone()[0]
+        cur = conn.execute(
+            "INSERT INTO checklists (card_id, title, position) VALUES (?,?,?)",
+            (card_id, body.title, max_pos + 1),
+        )
+        conn.commit()
+        cl = dict(conn.execute("SELECT * FROM checklists WHERE id=?", (cur.lastrowid,)).fetchone())
+        cl["items"] = []
+        return cl
+    finally:
+        conn.close()
+
+
+@app.patch("/api/checklists/{checklist_id}")
+def update_checklist(checklist_id: int, body: ChecklistCreate):
+    conn = database.get_db()
+    try:
+        conn.execute("UPDATE checklists SET title=? WHERE id=?", (body.title, checklist_id))
+        conn.commit()
+        return dict(conn.execute("SELECT * FROM checklists WHERE id=?", (checklist_id,)).fetchone())
+    finally:
+        conn.close()
+
+
+@app.delete("/api/checklists/{checklist_id}", status_code=204)
+def delete_checklist(checklist_id: int):
+    conn = database.get_db()
+    try:
+        conn.execute("DELETE FROM checklists WHERE id=?", (checklist_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ── Checklist items ───────────────────────────────────────────────────────────
+
+@app.post("/api/checklists/{checklist_id}/items", status_code=201)
+def create_checklist_item(checklist_id: int, body: ChecklistItemCreate):
+    conn = database.get_db()
+    try:
+        max_pos = conn.execute(
+            "SELECT COALESCE(MAX(position), -1) FROM checklist_items WHERE checklist_id=?",
+            (checklist_id,),
+        ).fetchone()[0]
+        cur = conn.execute(
+            "INSERT INTO checklist_items (checklist_id, text, position, assignee) VALUES (?,?,?,?)",
+            (checklist_id, body.text, max_pos + 1, body.assignee),
+        )
+        conn.commit()
+        return dict(conn.execute("SELECT * FROM checklist_items WHERE id=?", (cur.lastrowid,)).fetchone())
+    finally:
+        conn.close()
+
+
+@app.patch("/api/checklist-items/{item_id}")
+def update_checklist_item(item_id: int, body: ChecklistItemUpdate):
+    conn = database.get_db()
+    try:
+        item = conn.execute("SELECT * FROM checklist_items WHERE id=?", (item_id,)).fetchone()
+        if not item:
+            raise HTTPException(404, "Item not found")
+        updates = {k: v for k, v in body.model_dump().items() if k in body.model_fields_set}
+        if "completed" in updates:
+            updates["completed"] = 1 if updates["completed"] else 0
+        if not updates:
+            return dict(item)
+        set_parts = [f"{k}=?" for k in updates]
+        values = list(updates.values()) + [item_id]
+        conn.execute(f"UPDATE checklist_items SET {', '.join(set_parts)} WHERE id=?", values)
+        conn.commit()
+        return dict(conn.execute("SELECT * FROM checklist_items WHERE id=?", (item_id,)).fetchone())
+    finally:
+        conn.close()
+
+
+@app.delete("/api/checklist-items/{item_id}", status_code=204)
+def delete_checklist_item(item_id: int):
+    conn = database.get_db()
+    try:
+        conn.execute("DELETE FROM checklist_items WHERE id=?", (item_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ── Comments ──────────────────────────────────────────────────────────────────
+
+@app.get("/api/cards/{card_id}/comments")
+def get_comments(card_id: int):
+    conn = database.get_db()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM comments WHERE card_id=? ORDER BY created_at, id",
+            (card_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+@app.post("/api/cards/{card_id}/comments", status_code=201)
+def create_comment(card_id: int, body: CommentCreate, background_tasks: BackgroundTasks):
+    conn = database.get_db()
+    try:
+        card = conn.execute("SELECT * FROM cards WHERE id=?", (card_id,)).fetchone()
+        if not card:
+            raise HTTPException(404, "Card not found")
+        has_at_claude = 1 if "@claude" in body.text.lower() else 0
+        cur = conn.execute(
+            "INSERT INTO comments (card_id, author, text, has_at_claude) VALUES (?,?,?,?)",
+            (card_id, body.author, body.text, has_at_claude),
+        )
+        conn.commit()
+        comment = dict(conn.execute("SELECT * FROM comments WHERE id=?", (cur.lastrowid,)).fetchone())
+        if has_at_claude:
+            background_tasks.add_task(claude_reply, card_id, dict(card), body.text, cur.lastrowid)
+        return comment
+    finally:
+        conn.close()
+
+
+@app.patch("/api/comments/{comment_id}")
+def update_comment(comment_id: int, body: CommentUpdate):
+    conn = database.get_db()
+    try:
+        comment = conn.execute("SELECT * FROM comments WHERE id=?", (comment_id,)).fetchone()
+        if not comment:
+            raise HTTPException(404, "Comment not found")
+        conn.execute("UPDATE comments SET text=? WHERE id=?", (body.text, comment_id))
+        conn.commit()
+        return dict(conn.execute("SELECT * FROM comments WHERE id=?", (comment_id,)).fetchone())
+    finally:
+        conn.close()
+
+
+@app.delete("/api/comments/{comment_id}", status_code=204)
+def delete_comment(comment_id: int):
+    conn = database.get_db()
+    try:
+        conn.execute("DELETE FROM comments WHERE id=?", (comment_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ── Claude reply background task ──────────────────────────────────────────────
+
+def _build_claude_prompt(card: dict, comment_text: str) -> str:
+    lines = [
+        "You are an AI assistant embedded in a Kanban board. Respond concisely and helpfully.",
+        "",
+        "## Task",
+        f"**Title:** {card['title']}",
+    ]
+    if card.get("description"):
+        lines.append(f"**Description:** {card['description']}")
+    if card.get("priority") and card["priority"] != "none":
+        lines.append(f"**Priority:** {card['priority']}")
+    if card.get("due_date"):
+        lines.append(f"**Due:** {card['due_date']}")
+
+    # Fetch and include checklist items
+    conn = database.get_db()
+    try:
+        checklists = conn.execute(
+            "SELECT * FROM checklists WHERE card_id=? ORDER BY position", (card["id"],)
+        ).fetchall()
+        for cl in checklists:
+            items = conn.execute(
+                "SELECT * FROM checklist_items WHERE checklist_id=? ORDER BY position", (cl["id"],)
+            ).fetchall()
+            if items:
+                lines.append(f"\n**{cl['title']}:**")
+                for item in items:
+                    mark = "x" if item["completed"] else " "
+                    lines.append(f"- [{mark}] {item['text']}")
+    finally:
+        conn.close()
+
+    lines += [
+        "",
+        "## Comment",
+        comment_text,
+        "",
+        "## Instruction",
+        "Reply to the comment above. The user tagged @claude to ask for your help.",
+    ]
+    return "\n".join(lines)
+
+
+def _claude_cmd() -> list[str]:
+    """Return the command list to invoke claude, handling Windows .cmd wrapper."""
+    if sys.platform == "win32":
+        for name in ("claude", "claude.cmd"):
+            path = shutil.which(name)
+            if path:
+                return ["cmd", "/c", path, "-p"]
+        # Fallback: search common install location
+        import os
+        node_dir = r"C:\Users\hieutc12\nodejs\node-v24.14.0-win-x64"
+        fallback = os.path.join(node_dir, "claude.cmd")
+        return ["cmd", "/c", fallback, "-p"]
+    path = shutil.which("claude") or "claude"
+    return [path, "-p"]
+
+
+async def claude_reply(card_id: int, card: dict, comment_text: str, trigger_comment_id: int):
+    prompt = _build_claude_prompt(card, comment_text)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *_claude_cmd(),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(input=prompt.encode("utf-8")), timeout=120
+        )
+        reply_text = stdout.decode("utf-8").strip() if proc.returncode == 0 else f"⚠️ {stderr.decode('utf-8').strip()}"
+    except asyncio.TimeoutError:
+        reply_text = "⚠️ Request timed out"
+    except Exception as e:
+        reply_text = f"⚠️ {e}"
+
+    conn = database.get_db()
+    try:
+        conn.execute(
+            "INSERT INTO comments (card_id, author, text, reply_to_id) VALUES (?,?,?,?)",
+            (card_id, "claude", reply_text, trigger_comment_id),
+        )
+        conn.execute(
+            "UPDATE comments SET claude_handled=1 WHERE id=?",
+            (trigger_comment_id,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ── Static files (must be last) ───────────────────────────────────────────────
+
+app.mount("/", StaticFiles(directory="static", html=True), name="static")
