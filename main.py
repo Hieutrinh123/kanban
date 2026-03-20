@@ -456,7 +456,7 @@ def _build_claude_prompt(card: dict, comment_text: str, parent_text: str = None)
     if card.get("due_date"):
         lines.append(f"**Due:** {card['due_date']}")
 
-    # ... (same checklist logic) ...
+
     # Fetch and include checklist items
     conn = database.get_db()
     try:
