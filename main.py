@@ -27,19 +27,19 @@ async def browse_file(mode: str = "file"):
         raise HTTPException(500, "Tkinter not installed/available")
     
     # Run in a separate thread to avoid blocking the event loop
-    def _open_dialog():
+    def _open_dialog(m: str):
         root = tk.Tk()
         root.withdraw()
         root.attributes("-topmost", True)
-        if mode == "folder":
-            path = filedialog.askdirectory()
+        if m == "folder":
+            path = filedialog.askdirectory(title="Select Folder")
         else:
-            path = filedialog.askopenfilename()
+            path = filedialog.askopenfilename(title="Select File")
         root.destroy()
         return path
 
     loop = asyncio.get_event_loop()
-    selected_path = await loop.run_in_executor(None, _open_dialog)
+    selected_path = await loop.run_in_executor(None, _open_dialog, mode)
     return {"path": selected_path}
 
 

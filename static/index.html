@@ -1327,7 +1327,7 @@ function renderDetailBody(colId, card) {
         menu.remove();
         try {
           browseBtn.style.opacity = '0.5';
-          const res = await fetch(`/api/browse?mode=${o.id}`);
+          const res = await fetch(`/api/browse?mode=${o.id}&t=${Date.now()}`);
           const data = await res.json();
           if (data.path) {
             fileInput.value = data.path;
