@@ -430,7 +430,7 @@ input[type="date"].dp-input-sm{color-scheme:light}
 }
 
 /* ── Reply thread ── */
-.comment-thread{margin-top:10px;padding-left:14px;border-left:2px solid var(--border);display:flex;flex-direction:column;gap:8px}
+.comment-thread{margin-top:10px;padding-left:24px;border-left:2px solid var(--border-2);display:flex;flex-direction:column;gap:10px}
 .reply-item{display:flex;gap:8px}
 .reply-input-wrap{display:flex;align-items:flex-start;gap:8px;margin-top:8px;padding-left:14px;border-left:2px solid var(--border)}
 .reply-input{flex:1;border:1px solid var(--border);border-radius:var(--r-sm);padding:6px 10px;font-size:12px;color:var(--text);background:var(--surface-2);outline:none;resize:none;line-height:1.5;transition:border-color 0.15s}
@@ -661,21 +661,38 @@ async function loadData() {
   try {
     const board = await api('/board');
     const newData = { backlog:[], todo:[], doing:[], done:[] };
-    board.forEach(col => {
-      newData[col.id] = col.cards.map(c => ({
-        ...c,
-        dueDate: c.due_date // Map backend name
-      }));
+    const standardKeys = ['backlog', 'todo', 'doing', 'done'];
+    
+    board.forEach((col, index) => {
+      // Find the corresponding frontend column by index (the most reliable way)
+      const feId = standardKeys[index] || col.name.toLowerCase().replace(/[^a-z]/g, '');
+      
+      if (newData[feId] !== undefined) {
+        newData[feId] = col.cards.map(c => ({
+          ...c,
+          id: String(c.id), // Force string for comparison compatibility
+          dueDate: c.due_date
+        }));
+        
+        // Update COLS mapping
+        const colDef = COLS.find(c => c.id === feId);
+        if (colDef) {
+          colDef.dbId = col.id;
+        }
+      }
     });
     data = newData;
     render();
   } catch (e) {
     console.error('Failed to load board:', e);
+    document.getElementById('board').innerHTML = `
+      <div style="padding:40px; text-align:center; width:100%; color:var(--text-3)">
+        <h2 style="color:var(--text-1)">⚠️ Connection Error</h2>
+        <p>Could not connect to the backend server. Please check your terminal to see if the server started correctly.</p>
+        <button onclick="loadData()" class="btn btn-primary" style="margin-top:10px">Retry</button>
+      </div>
+    `;
   }
-}
-
-function persist() {
-  // Logic shifted to granular API calls in each action function
 }
 
 function uid() {
@@ -800,30 +817,33 @@ function buildColumn(col) {
     cw.querySelectorAll('.drop-line').forEach(g => g.remove());
     if (!dragId || !dragFrom || !dragOverTarget) return;
 
-    const fromCards = data[dragFrom];
-    const toCards = data[col.id];
+    const fromCards = data[dragFrom] || [];
+    const toCards = data[col.id] || [];
     
     // Optimistic UI update
-    const idx = fromCards.findIndex(c => c.id === dragId);
+    const idx = fromCards.findIndex(c => String(c.id) === String(dragId));
     if (idx === -1) return;
     const [card] = fromCards.splice(idx, 1);
     
     if (dragOverTarget.insertBeforeId === null) {
       toCards.push(card);
     } else {
-      const toIdx = toCards.findIndex(c => c.id === dragOverTarget.insertBeforeId);
+      const toIdx = toCards.findIndex(c => String(c.id) === String(dragOverTarget.insertBeforeId));
       toCards.splice(toIdx >= 0 ? toIdx : toCards.length, 0, card);
     }
 
     render();
-    if (detailCardId === card.id) detailColId = col.id;
+    if (String(detailCardId) === String(card.id)) detailColId = col.id;
 
     // Persist to server
     try {
+      const fromColDef = COLS.find(c => c.id === dragFrom);
+      const toColDef = COLS.find(c => c.id === col.id);
       await api(`/cards/${dragId}/move`, 'POST', {
-        column_id: col.id,
-        source_ids: fromCards.map(c => c.id),
-        target_ids: toCards.map(c => c.id)
+        column_id: toColDef?.dbId || 1,
+        source_column_id: fromColDef?.dbId || 1,
+        source_ids: fromCards.map(c => Number(c.id)),
+        target_ids: toCards.map(c => Number(c.id))
       });
     } catch (e) {
       console.error('Movement failed:', e);
@@ -849,7 +869,7 @@ function buildCard(card, colId) {
   el.className = 'card';
   el.dataset.id = card.id;
   el.draggable = true;
-  if (detailCardId === card.id) el.classList.add('detail-open');
+  if (String(detailCardId) === String(card.id)) el.classList.add('detail-open');
 
   const due = dueInfo(card.dueDate);
   const doneCount = (card.subtasks||[]).filter(s => s.done).length;
@@ -913,12 +933,24 @@ function buildCard(card, colId) {
 
   el.querySelector('.del').addEventListener('click', e => {
     e.stopPropagation();
-    if (!confirm('Delete this task?')) return;
-    data[colId] = data[colId].filter(c => c.id !== card.id);
-    persist(); render();
+    deleteCard(colId, card.id);
   });
 
   return el;
+}
+
+async function deleteCard(colId, cardId) {
+  if (!confirm('Delete this task?')) return;
+  try {
+    await api(`/cards/${cardId}`, 'DELETE');
+    if (data[colId]) {
+      data[colId] = data[colId].filter(c => String(c.id) !== String(cardId));
+    }
+    if (detailCardId === cardId) closeDetail();
+    render();
+  } catch (e) {
+    alert('Delete failed: ' + e.message);
+  }
 }
 
 function renderStats() {
@@ -1122,10 +1154,10 @@ function renderDetailHead(colId, card) {
 
 async function moveCardToColumn(cardId, fromColId, toColId) {
   if (fromColId === toColId) return;
-  const fromCards = data[fromColId];
-  const toCards = data[toColId];
+  const fromCards = data[fromColId] || [];
+  const toCards = data[toColId] || [];
   
-  const idx = fromCards.findIndex(c => c.id === cardId);
+  const idx = fromCards.findIndex(c => String(c.id) === String(cardId));
   if (idx === -1) return;
   const [card] = fromCards.splice(idx, 1);
   toCards.unshift(card);
@@ -1135,12 +1167,16 @@ async function moveCardToColumn(cardId, fromColId, toColId) {
   renderDetailHead(toColId, card);
   
   try {
+    const fromColDef = COLS.find(c => c.id === fromColId);
+    const toColDef = COLS.find(c => c.id === toColId);
     await api(`/cards/${cardId}/move`, 'POST', {
-      column_id: toColId,
-      source_ids: fromCards.map(c => c.id),
-      target_ids: toCards.map(c => c.id)
+      column_id: toColDef?.dbId || 1,
+      source_column_id: fromColDef?.dbId || 1,
+      source_ids: fromCards.map(c => Number(c.id)),
+      target_ids: toCards.map(c => Number(c.id))
     });
   } catch (e) {
+    console.error('Status change failed:', e);
     loadData();
   }
 }
@@ -1148,7 +1184,7 @@ async function moveCardToColumn(cardId, fromColId, toColId) {
 function getDetailCard() {
   if (!detailCardId) return null;
   for (const col of COLS) {
-    const card = data[col.id]?.find(c => c.id === detailCardId);
+    const card = data[col.id]?.find(c => String(c.id) === String(detailCardId));
     if (card) return card;
   }
   return null;
@@ -1304,6 +1340,7 @@ function renderDetailBody(colId, card) {
 
     // ── Comments ──
     const cmtSec = document.createElement('div');
+    cmtSec.id = 'dp-comments';
     cmtSec.innerHTML = '<div class="dp-sec-label">Comments</div>';
     renderComments(cmtSec, card);
     body.appendChild(cmtSec);
@@ -1325,15 +1362,13 @@ function renderDetailFooter(colId, card) {
   } else {
     const del = document.createElement('button');
     del.className = 'btn btn-danger'; del.textContent = 'Delete';
-    del.addEventListener('click', () => {
-      if (!confirm('Delete this task?')) return;
-      data[detailColId] = data[detailColId].filter(c => c.id !== card.id);
-      persist(); render(); closeDetail();
-    });
+    del.addEventListener('click', () => deleteCard(detailColId, card.id));
+    
     const arch = document.createElement('button');
     arch.className = 'btn btn-ghost';
     arch.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right:4px"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/></svg>Archive';
     arch.addEventListener('click', () => archiveCard(detailColId, card.id));
+    
     footer.appendChild(del);
     footer.appendChild(arch);
   }
@@ -1349,9 +1384,10 @@ async function createTask(colId) {
   const projTrigger = document.querySelector('.proj-trigger');
 
   try {
+    const colDef = COLS.find(c => c.id === colId);
     const card = await api('/cards', 'POST', {
       title,
-      column_id: colId,
+      column_id: colDef?.dbId || 1, // Use integer ID
       description: notes?.value.trim() || '',
       due_date: dueInput?.value || null,
       priority: priSel?.value || 'medium',
@@ -1379,7 +1415,7 @@ function autoSaveField(field, value) {
   let targetCard = null;
   let targetCol = null;
   for (const col of COLS) {
-    targetCard = data[col.id].find(c => c.id === detailCardId);
+    targetCard = (data[col.id] || []).find(c => String(c.id) === String(detailCardId));
     if (targetCard) { targetCol = col.id; break; }
   }
   if (!targetCard) return;
@@ -1387,18 +1423,18 @@ function autoSaveField(field, value) {
   // Update local
   targetCard[field] = value;
   
-  // Update UI optimistically
-  const cardEl = document.querySelector(`.card[data-id="${detailCardId}"]`);
-  if (cardEl) {
-    const newEl = buildCard(targetCard, targetCol);
-    newEl.classList.add('detail-open');
-    cardEl.replaceWith(newEl);
-  }
-  renderStats();
-
-  // Debounced API call
+  // Debounced API and UI update
   clearTimeout(autoSaveTimer);
   autoSaveTimer = setTimeout(async () => {
+    // Update UI on board after typing stops
+    const cardEl = document.querySelector(`.card[data-id="${String(detailCardId)}"]`);
+    if (cardEl) {
+      const newEl = buildCard(targetCard, targetCol);
+      newEl.classList.add('detail-open');
+      cardEl.replaceWith(newEl);
+    }
+    renderStats();
+
     try {
       const backendField = field === 'dueDate' ? 'due_date' : field === 'notes' ? 'description' : field;
       await api(`/cards/${detailCardId}`, 'PATCH', { [backendField]: value });
@@ -1638,38 +1674,30 @@ function renderSubtasks(container, card) {
 }
 
 function autoSaveSubtask(card, idx, sub) {
-  if (!detailCardId) return;
-  for (const col of COLS) {
-    const c = data[col.id]?.find(c => c.id === detailCardId);
-    if (c) {
-      c.subtasks[idx] = sub;
-      persist();
-      // Re-render card
-      const cardEl = document.querySelector(`.card[data-id="${detailCardId}"]`);
-      if (cardEl) {
-        const parent = cardEl.parentElement;
-        const next = cardEl.nextSibling;
-        const newEl = buildCard(c, col.id);
-        newEl.classList.add('detail-open');
-        parent.insertBefore(newEl, next);
-        cardEl.remove();
-      }
-      return;
-    }
-  }
+  if (!card.subtasks) card.subtasks = [];
+  card.subtasks[idx] = sub;
+  autoSaveField('subtasks', card.subtasks);
 }
 
 // ─── Comments ────────────────────────────────────────────────────────────────
-async function addComment(card, text) {
+async function addComment(card, text, replyToId = null) {
   try {
     const cmt = await api(`/cards/${card.id}/comments`, 'POST', {
       author: 'user',
-      text: text
+      text: text,
+      reply_to_id: replyToId ? Number(replyToId) : null
     });
     // Refresh card to get comments
     const updated = await api(`/cards/${card.id}`);
-    const feCard = { ...updated, dueDate: updated.due_date, id: updated.id };
-    openDetail(detailColId, feCard);
+    const feCard = { ...updated, dueDate: updated.due_date, id: String(updated.id) };
+    
+    // Update local data
+    for (const col of COLS) {
+      const idx = data[col.id].findIndex(c => String(c.id) === String(card.id));
+      if (idx !== -1) { data[col.id][idx] = feCard; break; }
+    }
+    
+    renderComments(document.getElementById('dp-comments'), feCard);
   } catch (e) {
     console.error('Add comment failed:', e);
   }
@@ -1677,9 +1705,7 @@ async function addComment(card, text) {
 
 function renderComments(container, card) {
   if (!container) return;
-  container.querySelectorAll('.comment-list,.comment-input-row').forEach(el => el.remove());
-
-  const comments = [...(card.comments || [])].sort((a,b) => b.id - a.id);
+  container.querySelectorAll('.comment-list,.comment-input-row,.reply-input-wrap').forEach(el => el.remove());
 
   // Input row
   const inputRow = document.createElement('div');
@@ -1695,35 +1721,91 @@ function renderComments(container, card) {
   sendBtn.textContent = 'Send';
   sendBtn.onclick = async () => {
     const text = input.value.trim();
-    if (text) await addComment(card, text);
+    if (text) {
+      await addComment(card, text);
+      input.value = '';
+    }
   };
   inputRow.appendChild(sendBtn);
   container.appendChild(inputRow);
 
+  const comments = card.comments || [];
   if (comments.length === 0) return;
 
   const list = document.createElement('div');
   list.className = 'comment-list';
   list.style.marginTop = '12px';
 
-  comments.forEach(cmt => {
-    const item = document.createElement('div');
-    item.className = 'comment-item' + (cmt.author === 'claude' ? ' claude-reply' : '');
+  // Sort: Top-level NEWEST first. Replies: under parents, OLDEST first (standard thread).
+  const topLevels = comments.filter(c => !c.reply_to_id).sort((a,b) => b.id - a.id);
+  
+  topLevels.forEach(cmt => {
+    list.appendChild(buildCommentMarkup(cmt, card));
     
-    const time = new Date(cmt.created_at).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
-    
-    item.innerHTML = `
+    // Replies
+    const replies = comments.filter(r => r.reply_to_id && String(r.reply_to_id) === String(cmt.id)).sort((a,b) => a.id - b.id);
+    if (replies.length > 0) {
+      const thread = document.createElement('div');
+      thread.className = 'comment-thread';
+      replies.forEach(r => thread.appendChild(buildCommentMarkup(r, card, true)));
+      list.appendChild(thread);
+    }
+  });
+
+  container.appendChild(list);
+}
+
+function buildCommentMarkup(cmt, card, isReply = false) {
+  const item = document.createElement('div');
+  item.className = (isReply ? 'reply-item' : 'comment-item') + (cmt.author === 'claude' ? ' claude-reply' : '');
+  item.dataset.id = cmt.id;
+  
+  const time = new Date(cmt.created_at).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+  
+  item.innerHTML = `
+    <div class="avatar-${cmt.author === 'claude' ? 'claude' : 'h xs'}">${cmt.author === 'claude' ? '✦' : 'H'}</div>
+    <div style="flex:1; min-width:0">
       <div class="comment-meta">
-        <div class="avatar-${cmt.author === 'claude' ? 'claude' : 'h xs'}">${cmt.author === 'claude' ? '✦' : 'H'}</div>
         <span class="comment-author">${cmt.author === 'claude' ? 'Claude' : 'Hieu'}</span>
         <span class="comment-time">${time}</span>
+        ${!isReply ? `<button class="comment-act reply-btn" style="margin-left:8px">Reply</button>` : ''}
         ${cmt.has_at_claude && !cmt.claude_handled ? '<span class="comment-pending">⏳ waiting for Claude…</span>' : ''}
       </div>
       <div class="comment-bubble" style="overflow-wrap: break-word;">${formatComment(cmt.text)}</div>
-    `;
-    list.appendChild(item);
-  });
-  container.appendChild(list);
+    </div>
+  `;
+
+  if (!isReply) {
+    item.querySelector('.reply-btn').onclick = () => showReplyInput(item, cmt.id, card);
+  }
+
+  return item;
+}
+
+function showReplyInput(parentEl, replyToId, card) {
+  let existing = parentEl.nextElementSibling;
+  if (existing?.classList.contains('reply-input-wrap')) {
+    existing.remove();
+    return;
+  }
+  
+  const wrap = document.createElement('div');
+  wrap.className = 'reply-input-wrap';
+  wrap.innerHTML = `
+    <textarea class="reply-input" placeholder="Type a reply…"></textarea>
+    <button class="reply-send">Reply</button>
+  `;
+  
+  wrap.querySelector('.reply-send').onclick = async () => {
+    const txt = wrap.querySelector('.reply-input').value.trim();
+    if (txt) {
+      await addComment(card, txt, replyToId);
+      wrap.remove();
+    }
+  };
+  
+  parentEl.after(wrap);
+  wrap.querySelector('.reply-input').focus();
 }
 
 // ─── Polling ─────────────────────────────────────────────────────────────────
@@ -1734,9 +1816,19 @@ setInterval(async () => {
       const feCard = { ...card, dueDate: card.due_date, id: card.id };
       const oldCmts = (getDetailCard() || {}).comments || [];
       if (feCard.comments.length !== oldCmts.length) {
-         renderComments(document.querySelector('#dp-body .dp-sec-label:last-of-type')?.parentElement, feCard);
+         // Avoid wiping if user is typing
+         const isTyping = document.activeElement && (
+           document.activeElement.classList.contains('comment-input') || 
+           document.activeElement.classList.contains('reply-input') ||
+           document.activeElement.classList.contains('dp-title-input') ||
+           document.activeElement.classList.contains('dp-notes')
+         );
+         if (!isTyping) {
+           renderComments(document.querySelector('#dp-body .dp-sec-label:last-of-type')?.parentElement, feCard);
+         }
+         
          for (const col of COLS) {
-           const idx = data[col.id].findIndex(c => c.id === detailCardId);
+           const idx = data[col.id].findIndex(c => String(c.id) === String(detailCardId));
            if (idx !== -1) { data[col.id][idx] = feCard; break; }
          }
       }
@@ -1772,7 +1864,22 @@ document.addEventListener('keydown', e => {
 });
 
 // ─── Init ────────────────────────────────────────────────────────────────────
-loadData();
+if (window.location.protocol === 'file:') {
+  setTimeout(() => {
+    document.getElementById('board').innerHTML = `
+      <div style="padding:40px; text-align:center; width:100%; color:var(--text-3)">
+        <h2 style="color:var(--text-1)">⚠️ Board Offline</h2>
+        <p>You opened the file directly (file://). To see your tasks, please:</p>
+        <ol style="display:inline-block; text-align:left; margin-top:10px">
+          <li>Run <b>start.bat</b></li>
+          <li>Use the browser window that opens (<b>localhost:8000</b>)</li>
+        </ol>
+      </div>
+    `;
+  }, 100);
+} else {
+  loadData();
+}
 </script>
 </body>
 </html>
