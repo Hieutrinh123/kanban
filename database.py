@@ -74,6 +74,7 @@ def init_db():
         "ALTER TABLE comments ADD COLUMN claude_handled INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE comments ADD COLUMN reply_to_id INTEGER REFERENCES comments(id) ON DELETE SET NULL",
         "ALTER TABLE comments ADD COLUMN status TEXT NOT NULL DEFAULT 'done'",
+        "ALTER TABLE cards ADD COLUMN file_path TEXT",
     ]:
         try:
             conn.execute(sql)

@@ -11,8 +11,33 @@ from pydantic import BaseModel
 
 import database
 
+try:
+    import tkinter as tk
+    from tkinter import filedialog
+except ImportError:
+    tk = None
+
 app = FastAPI(title="Kanban Board")
 database.init_db()
+
+
+@app.get("/api/browse")
+async def browse_file():
+    if not tk:
+        raise HTTPException(500, "Tkinter not installed/available")
+    
+    # Run in a separate thread to avoid blocking the event loop
+    def _open_dialog():
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        path = filedialog.askopenfilename()
+        root.destroy()
+        return path
+
+    loop = asyncio.get_event_loop()
+    selected_path = await loop.run_in_executor(None, _open_dialog)
+    return {"path": selected_path}
 
 
 # ── Pydantic models ───────────────────────────────────────────────────────────
@@ -25,6 +50,7 @@ class CardCreate(BaseModel):
     priority: str = "none"
     project: Optional[str] = None
     assignee: Optional[str] = None
+    file_path: Optional[str] = None
 
 
 class CardUpdate(BaseModel):
@@ -34,6 +60,7 @@ class CardUpdate(BaseModel):
     priority: Optional[str] = None
     project: Optional[str] = None
     assignee: Optional[str] = None
+    file_path: Optional[str] = None
 
 
 class CardMove(BaseModel):
@@ -142,8 +169,8 @@ def create_card(body: CardCreate):
             (body.column_id,),
         ).fetchone()[0]
         cur = conn.execute(
-            "INSERT INTO cards (title, description, column_id, position, due_date, priority, project, assignee) VALUES (?,?,?,?,?,?,?,?)",
-            (body.title, body.description, body.column_id, max_pos + 1, body.due_date, body.priority, body.project, body.assignee),
+            "INSERT INTO cards (title, description, column_id, position, due_date, priority, project, assignee, file_path) VALUES (?,?,?,?,?,?,?,?,?)",
+            (body.title, body.description, body.column_id, max_pos + 1, body.due_date, body.priority, body.project, body.assignee, body.file_path),
         )
         conn.commit()
         return get_card_full(conn, cur.lastrowid)
@@ -446,6 +473,25 @@ def _build_claude_prompt(card: dict, comment_text: str) -> str:
                     lines.append(f"- [{mark}] {item['text']}")
     finally:
         conn.close()
+
+    # Include referenced file content if path is provided
+    if card.get("file_path"):
+        fpath = Path(card["file_path"])
+        if fpath.exists() and fpath.is_file():
+            try:
+                # Basic safety: skip files > 100KB or binary-ish
+                if fpath.stat().st_size < 100_000:
+                    content = fpath.read_text(errors="replace")
+                    lines.append(f"\n## Referenced File: {fpath.name}")
+                    lines.append("```")
+                    lines.append(content)
+                    lines.append("```")
+                else:
+                    lines.append(f"\n## Referenced File: {fpath.name}")
+                    lines.append("(File is too large to include full content)")
+            except Exception as e:
+                lines.append(f"\n## Referenced File Error")
+                lines.append(f"Could not read {fpath.name}: {str(e)}")
 
     lines += [
         "",
