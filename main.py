@@ -22,24 +22,49 @@ database.init_db()
 
 
 @app.get("/api/browse")
-async def browse_file(mode: str = "file"):
+async def browse_file():
     if not tk:
         raise HTTPException(500, "Tkinter not installed/available")
     
-    # Run in a separate thread to avoid blocking the event loop
-    def _open_dialog(m: str):
+    def _open_dialog():
         root = tk.Tk()
-        root.withdraw()
+        root.title("Select Type")
         root.attributes("-topmost", True)
-        if m == "folder":
-            path = filedialog.askdirectory(title="Select Folder")
-        else:
-            path = filedialog.askopenfilename(title="Select File")
-        root.destroy()
-        return path
+        root.geometry("250x100")
+        
+        # Center it
+        ws = root.winfo_screenwidth()
+        hs = root.winfo_screenheight()
+        x = (ws/2) - (250/2)
+        y = (hs/2) - (100/2)
+        root.geometry(f"+{int(x)}+{int(y)}")
+        
+        result = {"path": None}
+        
+        def on_file():
+            root.withdraw()
+            result["path"] = filedialog.askopenfilename(title="Select File")
+            root.destroy()
+            
+        def on_folder():
+            root.withdraw()
+            result["path"] = filedialog.askdirectory(title="Select Folder")
+            root.destroy()
+            
+        tk.Label(root, text="What would you like to link?", pady=10).pack()
+        btn_frame = tk.Frame(root)
+        btn_frame.pack(expand=True)
+        tk.Button(btn_frame, text="File", command=on_file, width=10).pack(side=tk.LEFT, padx=5)
+        tk.Button(btn_frame, text="Folder", command=on_folder, width=10).pack(side=tk.LEFT, padx=5)
+        
+        # Handle X button
+        root.protocol("WM_DELETE_WINDOW", root.destroy)
+        
+        root.mainloop()
+        return result["path"]
 
     loop = asyncio.get_event_loop()
-    selected_path = await loop.run_in_executor(None, _open_dialog, mode)
+    selected_path = await loop.run_in_executor(None, _open_dialog)
     return {"path": selected_path}
 
 

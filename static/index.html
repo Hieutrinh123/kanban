@@ -1299,51 +1299,20 @@ function renderDetailBody(colId, card) {
   const browseBtn = document.createElement('button');
   browseBtn.className = 'btn-ghost';
   browseBtn.style.padding = '4px';
-  browseBtn.style.position = 'relative';
   browseBtn.title = 'Browse…';
   browseBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>';
-  
-  browseBtn.onclick = (e) => {
-    e.stopPropagation();
-    const existing = document.getElementById('browse-menu');
-    if (existing) { existing.remove(); return; }
-    
-    const menu = document.createElement('div');
-    menu.id = 'browse-menu';
-    menu.style.cssText = 'position:absolute;bottom:calc(100% + 5px);right:0;background:var(--surface);border:1px solid var(--border-2);border-radius:var(--r);box-shadow:0 4px 12px rgba(0,0,0,0.15);z-index:400;min-width:100px;overflow:hidden;animation:fadeUp 0.1s ease';
-    
-    const opts = [
-      { id: 'file', label: 'File', icon: '<path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/>' },
-      { id: 'folder', label: 'Folder', icon: '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>' }
-    ];
-    
-    opts.forEach(o => {
-      const item = document.createElement('div');
-      item.style.cssText = 'padding:8px 12px;cursor:pointer;font-size:12px;display:flex;align-items:center;gap:8px;transition:background 0.1s';
-      item.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">${o.icon}</svg> ${o.label}`;
-      item.addEventListener('mouseover', () => item.style.background = 'var(--surface-2)');
-      item.addEventListener('mouseout',  () => item.style.background = '');
-      item.addEventListener('click', async () => {
-        menu.remove();
-        try {
-          browseBtn.style.opacity = '0.5';
-          const res = await fetch(`/api/browse?mode=${o.id}&t=${Date.now()}`);
-          const data = await res.json();
-          if (data.path) {
-            fileInput.value = data.path;
-            if (!isNew) autoSaveField('file_path', data.path);
-          }
-        } finally {
-          browseBtn.style.opacity = '1';
-        }
-      });
-      menu.appendChild(item);
-    });
-    
-    browseBtn.appendChild(menu);
-    setTimeout(() => {
-      document.addEventListener('click', function h() { menu.remove(); document.removeEventListener('click', h); });
-    }, 0);
+  browseBtn.onclick = async () => {
+    try {
+      browseBtn.style.opacity = '0.5';
+      const res = await fetch(`/api/browse?t=${Date.now()}`);
+      const data = await res.json();
+      if (data.path) {
+        fileInput.value = data.path;
+        if (!isNew) autoSaveField('file_path', data.path);
+      }
+    } finally {
+      browseBtn.style.opacity = '1';
+    }
   };
 
   fileWrap.appendChild(browseBtn);
