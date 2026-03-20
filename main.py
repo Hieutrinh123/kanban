@@ -119,6 +119,7 @@ class ChecklistItemUpdate(BaseModel):
 
 class CommentCreate(BaseModel):
     text: str
+    reply_to_id: Optional[int] = None
     author: str = "user"
 
 
