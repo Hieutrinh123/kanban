@@ -197,13 +197,29 @@ def delete_card(card_id: int):
 def move_card(card_id: int, body: CardMove):
     conn = database.get_db()
     try:
+        # Verify card exists
+        card = conn.execute("SELECT * FROM cards WHERE id=?", (card_id,)).fetchone()
+        if not card:
+            raise HTTPException(404, "Card not found")
+            
+        # Update source column positions
         for pos, cid in enumerate(body.source_ids):
             conn.execute("UPDATE cards SET position=? WHERE id=?", (pos, cid))
+            
+        # Update target column positions and move the card
         for pos, cid in enumerate(body.target_ids):
             conn.execute(
                 "UPDATE cards SET column_id=?, position=?, updated_at=datetime('now') WHERE id=?",
                 (body.column_id, pos, cid),
             )
+        
+        # Ensure the specific card_id is in the target column at some position
+        # (The frontend usually includes it in target_ids, but we'll be explicit)
+        conn.execute(
+            "UPDATE cards SET column_id=?, updated_at=datetime('now') WHERE id=?",
+            (body.column_id, card_id),
+        )
+        
         conn.commit()
         return {"ok": True}
     finally:
@@ -362,7 +378,7 @@ def create_comment(card_id: int, body: CommentCreate, background_tasks: Backgrou
         has_at_claude = 1 if "@claude" in body.text.lower() else 0
         cur = conn.execute(
             "INSERT INTO comments (card_id, author, text, has_at_claude) VALUES (?,?,?,?)",
-            (card_id, body.author, body.text, has_at_claude),
+            (card_id, "user", body.text, has_at_claude),
         )
         conn.commit()
         comment = dict(conn.execute("SELECT * FROM comments WHERE id=?", (cur.lastrowid,)).fetchone())
@@ -442,38 +458,45 @@ def _build_claude_prompt(card: dict, comment_text: str) -> str:
     return "\n".join(lines)
 
 
-def _claude_cmd() -> list[str]:
-    """Return the command list to invoke the claude CLI."""
-    # Try to find the executable on the system PATH
+def _claude_cmd() -> tuple[list[str], bool]:
+    """Return the command list to invoke the claude CLI and a boolean if found."""
     for name in ("claude", "claude.cmd", "claude.exe"):
         path = shutil.which(name)
         if path:
-            # On Windows, use 'cmd /c' to ensure .cmd files run correctly
             if sys.platform == "win32" and path.lower().endswith(".cmd"):
-                return ["cmd", "/c", path, "-p"]
-            return [path, "-p"]
+                return ["cmd", "/c", path, "-p"], True
+            return [path, "-p"], True
     
-    # Fallback: Just try 'claude' directly and let the shell decide
-    return ["claude", "-p"]
+    return ["claude", "-p"], False
 
 
 async def claude_reply(card_id: int, card: dict, comment_text: str, trigger_comment_id: int):
-    prompt = _build_claude_prompt(card, comment_text)
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *_claude_cmd(),
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+    cmd, found = _claude_cmd()
+    if not found:
+        reply_text = (
+            "⚠️ Error: Claude CLI was not found on your system PATH.\n\n"
+            "To fix this:\n"
+            "1. Install the Claude CLI (`npm install -g @anthropic-ai/claude-code`)\n"
+            "2. Ensure it is in your Windows Environment PATH.\n"
+            "3. Or, if you use a different name/path, update `_claude_cmd` in `main.py`."
         )
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(input=prompt.encode("utf-8")), timeout=120
-        )
-        reply_text = stdout.decode("utf-8").strip() if proc.returncode == 0 else f"⚠️ {stderr.decode('utf-8').strip()}"
-    except asyncio.TimeoutError:
-        reply_text = "⚠️ Request timed out after 120 seconds. Claude CLI might be hanging or your internet is very slow."
-    except Exception as e:
-        reply_text = f"⚠️ Error running Claude CLI: {str(e)}"
+    else:
+        prompt = _build_claude_prompt(card, comment_text)
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(input=prompt.encode("utf-8")), timeout=120
+            )
+            reply_text = stdout.decode("utf-8").strip() if proc.returncode == 0 else f"⚠️ {stderr.decode('utf-8').strip()}"
+        except asyncio.TimeoutError:
+            reply_text = "⚠️ Request timed out after 120 seconds. Claude CLI might be hanging or your internet is very slow."
+        except Exception as e:
+            reply_text = f"⚠️ Error running Claude CLI: {str(e)}"
 
     conn = database.get_db()
     try:
