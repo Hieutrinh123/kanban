@@ -443,19 +443,18 @@ def _build_claude_prompt(card: dict, comment_text: str) -> str:
 
 
 def _claude_cmd() -> list[str]:
-    """Return the command list to invoke claude, handling Windows .cmd wrapper."""
-    if sys.platform == "win32":
-        for name in ("claude", "claude.cmd"):
-            path = shutil.which(name)
-            if path:
+    """Return the command list to invoke the claude CLI."""
+    # Try to find the executable on the system PATH
+    for name in ("claude", "claude.cmd", "claude.exe"):
+        path = shutil.which(name)
+        if path:
+            # On Windows, use 'cmd /c' to ensure .cmd files run correctly
+            if sys.platform == "win32" and path.lower().endswith(".cmd"):
                 return ["cmd", "/c", path, "-p"]
-        # Fallback: search common install location
-        import os
-        node_dir = r"C:\Users\hieutc12\nodejs\node-v24.14.0-win-x64"
-        fallback = os.path.join(node_dir, "claude.cmd")
-        return ["cmd", "/c", fallback, "-p"]
-    path = shutil.which("claude") or "claude"
-    return [path, "-p"]
+            return [path, "-p"]
+    
+    # Fallback: Just try 'claude' directly and let the shell decide
+    return ["claude", "-p"]
 
 
 async def claude_reply(card_id: int, card: dict, comment_text: str, trigger_comment_id: int):
@@ -472,9 +471,9 @@ async def claude_reply(card_id: int, card: dict, comment_text: str, trigger_comm
         )
         reply_text = stdout.decode("utf-8").strip() if proc.returncode == 0 else f"⚠️ {stderr.decode('utf-8').strip()}"
     except asyncio.TimeoutError:
-        reply_text = "⚠️ Request timed out"
+        reply_text = "⚠️ Request timed out after 120 seconds. Claude CLI might be hanging or your internet is very slow."
     except Exception as e:
-        reply_text = f"⚠️ {e}"
+        reply_text = f"⚠️ Error running Claude CLI: {str(e)}"
 
     conn = database.get_db()
     try:
