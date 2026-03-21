@@ -1313,7 +1313,7 @@ function renderDetailBody(colId, card) {
   const browseBtn = document.createElement('button');
   browseBtn.className = 'btn-ghost';
   browseBtn.style.padding = '4px';
-  browseBtn.title = 'Browse…';
+  browseBtn.title = 'Browse file or folder…';
   browseBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>';
   browseBtn.onclick = async () => {
     try {
@@ -1328,7 +1328,6 @@ function renderDetailBody(colId, card) {
       browseBtn.style.opacity = '1';
     }
   };
-
   fileWrap.appendChild(browseBtn);
   fileSec.appendChild(fileWrap);
   body.appendChild(fileSec);
@@ -1734,13 +1733,17 @@ function renderComments(container, card) {
   const sendBtn = document.createElement('button');
   sendBtn.className = 'comment-send';
   sendBtn.textContent = 'Send';
-  sendBtn.onclick = async () => {
+  const doSend = async () => {
     const text = input.value.trim();
     if (text) {
       await addComment(card, text);
       input.value = '';
     }
   };
+  sendBtn.onclick = doSend;
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(); }
+  });
   inputRow.appendChild(sendBtn);
   container.appendChild(inputRow);
 
@@ -1811,14 +1814,18 @@ function showReplyInput(parentEl, replyToId, card) {
     <button class="reply-send">Reply</button>
   `;
   
-  wrap.querySelector('.reply-send').onclick = async () => {
+  const doReply = async () => {
     const txt = wrap.querySelector('.reply-input').value.trim();
     if (txt) {
       await addComment(card, txt, replyToId);
       wrap.remove();
     }
   };
-  
+  wrap.querySelector('.reply-send').onclick = doReply;
+  wrap.querySelector('.reply-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doReply(); }
+  });
+
   parentEl.after(wrap);
   wrap.querySelector('.reply-input').focus();
 }

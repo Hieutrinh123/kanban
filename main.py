@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+import subprocess
 import sys
+from pathlib import Path
 from typing import List, Optional
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
@@ -23,48 +25,52 @@ database.init_db()
 
 @app.get("/api/browse")
 async def browse_file():
-    if not tk:
-        raise HTTPException(500, "Tkinter not installed/available")
-    
-    def _open_dialog():
-        root = tk.Tk()
-        root.title("Select Type")
-        root.attributes("-topmost", True)
-        root.geometry("250x100")
-        
-        # Center it
-        ws = root.winfo_screenwidth()
-        hs = root.winfo_screenheight()
-        x = (ws/2) - (250/2)
-        y = (hs/2) - (100/2)
-        root.geometry(f"+{int(x)}+{int(y)}")
-        
-        result = {"path": None}
-        
-        def on_file():
-            root.withdraw()
-            result["path"] = filedialog.askopenfilename(title="Select File")
-            root.destroy()
-            
-        def on_folder():
-            root.withdraw()
-            result["path"] = filedialog.askdirectory(title="Select Folder")
-            root.destroy()
-            
-        tk.Label(root, text="What would you like to link?", pady=10).pack()
-        btn_frame = tk.Frame(root)
-        btn_frame.pack(expand=True)
-        tk.Button(btn_frame, text="File", command=on_file, width=10).pack(side=tk.LEFT, padx=5)
-        tk.Button(btn_frame, text="Folder", command=on_folder, width=10).pack(side=tk.LEFT, padx=5)
-        
-        # Handle X button
-        root.protocol("WM_DELETE_WINDOW", root.destroy)
-        
-        root.mainloop()
-        return result["path"]
+    """Show a File / Folder choice popup then open the appropriate native picker."""
+    if sys.platform == "win32":
+        # Tkinter cannot be used from a thread executor on Windows.
+        # Use a PowerShell WinForms form for the whole flow.
+        # One dialog for both files and folders:
+        # navigate to a file → click Open = select file
+        # navigate INTO a folder → click Open = select that folder
+        ps = (
+            "Add-Type -AssemblyName System.Windows.Forms;"
+            "$d=New-Object System.Windows.Forms.OpenFileDialog;"
+            "$d.Title='Select a file or folder';"
+            "$d.ValidateNames=$false;"
+            "$d.CheckFileExists=$false;"
+            "$d.CheckPathExists=$false;"
+            "$d.FileName='Select Folder.';"
+            "if($d.ShowDialog()-eq'OK'){"
+            "  $p=$d.FileName;"
+            "  if([System.IO.File]::Exists($p)){$p}"
+            "  elseif([System.IO.Directory]::Exists($p)){$p}"
+            "  else{Split-Path $p}"
+            "}else{''}"
+        )
 
-    loop = asyncio.get_event_loop()
-    selected_path = await loop.run_in_executor(None, _open_dialog)
+        def _run():
+            r = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", ps],
+                capture_output=True, text=True, timeout=60,
+            )
+            return r.stdout.strip() or None
+
+        loop = asyncio.get_running_loop()
+        selected_path = await loop.run_in_executor(None, _run)
+    else:
+        if not tk:
+            raise HTTPException(500, "Tkinter not installed/available")
+
+        def _run():
+            root = tk.Tk()
+            root.withdraw()
+            path = filedialog.askopenfilename(title="Select File or Folder")
+            root.destroy()
+            return path or None
+
+        loop = asyncio.get_running_loop()
+        selected_path = await loop.run_in_executor(None, _run)
+
     return {"path": selected_path}
 
 
@@ -543,9 +549,12 @@ def _claude_cmd() -> tuple[list[str], bool]:
         path = shutil.which(name)
         if path:
             if sys.platform == "win32" and path.lower().endswith(".cmd"):
-                return ["cmd", "/c", path, "-p"], True
+                # Use full path to cmd.exe — bare "cmd" can fail in CreateProcess
+                # when the server is started without a full system PATH.
+                cmd_exe = shutil.which("cmd") or r"C:\Windows\System32\cmd.exe"
+                return [cmd_exe, "/c", path, "-p"], True
             return [path, "-p"], True
-    
+
     return ["claude", "-p"], False
 
 
@@ -574,17 +583,21 @@ async def claude_reply(card_id: int, card: dict, comment_text: str, trigger_comm
 
         prompt = _build_claude_prompt(card, comment_text, parent_text)
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(input=prompt.encode("utf-8")), timeout=120
-            )
-            reply_text = stdout.decode("utf-8").strip() if proc.returncode == 0 else f"⚠️ {stderr.decode('utf-8').strip()}"
-        except asyncio.TimeoutError:
+            # Use subprocess.run in a thread — more reliable than
+            # asyncio.create_subprocess_exec on Windows for .cmd wrappers.
+            loop = asyncio.get_running_loop()
+            def _run():
+                result = subprocess.run(
+                    cmd,
+                    input=prompt.encode("utf-8"),
+                    capture_output=True,
+                    timeout=120,
+                )
+                if result.returncode == 0:
+                    return result.stdout.decode("utf-8").strip()
+                return f"⚠️ {result.stderr.decode('utf-8').strip()}"
+            reply_text = await loop.run_in_executor(None, _run)
+        except subprocess.TimeoutExpired:
             reply_text = "⚠️ Request timed out after 120 seconds. Claude CLI might be hanging or your internet is very slow."
         except Exception as e:
             reply_text = f"⚠️ Error running Claude CLI: {str(e)}"
