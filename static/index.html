@@ -385,7 +385,6 @@ input[type="date"].dp-input-sm{color-scheme:light}
 
 .comment-list{display:flex;flex-direction:column;gap:12px}
 .comment-item{display:flex;gap:10px}
-.comment-item.claude-reply{flex-direction:column;padding:10px;background:#f0eeff;border-radius:var(--r);border:1px solid rgba(124,77,255,0.15)}
 .reply-item.claude-reply{background:#f0eeff;border-radius:var(--r);border:1px solid rgba(124,77,255,0.15);padding:8px 10px}
 .comment-meta{display:flex;align-items:center;gap:6px;margin-bottom:4px}
 .comment-author{font-size:11.5px;font-weight:700;color:var(--text)}
@@ -431,7 +430,7 @@ input[type="date"].dp-input-sm{color-scheme:light}
 }
 
 /* ── Reply thread ── */
-.comment-thread{margin-top:10px;padding-left:24px;border-left:2px solid var(--border-2);display:flex;flex-direction:column;gap:10px}
+.comment-thread{margin-top:10px;margin-left:26px;padding-left:16px;border-left:2px solid var(--border-2);display:flex;flex-direction:column;gap:10px}
 .reply-item{display:flex;gap:8px}
 .reply-input-wrap{display:flex;align-items:flex-start;gap:8px;margin-top:8px;padding-left:14px;border-left:2px solid var(--border)}
 .reply-input{flex:1;border:1px solid var(--border);border-radius:var(--r-sm);padding:6px 10px;font-size:12px;color:var(--text);background:var(--surface-2);outline:none;resize:none;line-height:1.5;transition:border-color 0.15s}
@@ -1906,9 +1905,7 @@ setInterval(async () => {
       const card = await api(`/cards/${detailCardId}`);
       const feCard = { ...card, dueDate: card.due_date, id: card.id };
       const oldCmts = (getDetailCard() || {}).comments || [];
-      const hasStreamBubble = !!document.querySelector('[data-stream-for]');
-      const countChanged = feCard.comments.length !== oldCmts.length;
-      if (countChanged || hasStreamBubble) {
+      if (feCard.comments.length !== oldCmts.length) {
          const isTyping = document.activeElement && (
            document.activeElement.classList.contains('comment-input') ||
            document.activeElement.classList.contains('reply-input') ||
