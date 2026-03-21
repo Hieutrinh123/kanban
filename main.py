@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import shutil
 import subprocess
@@ -295,13 +296,6 @@ def move_card(card_id: int, body: CardMove):
                 "UPDATE cards SET column_id=?, position=?, updated_at=datetime('now') WHERE id=?",
                 (body.column_id, pos, cid),
             )
-        
-        # Ensure the specific card_id is in the target column at some position
-        # (The frontend usually includes it in target_ids, but we'll be explicit)
-        conn.execute(
-            "UPDATE cards SET column_id=?, updated_at=datetime('now') WHERE id=?",
-            (body.column_id, card_id),
-        )
         
         conn.commit()
         return {"ok": True}
@@ -600,54 +594,6 @@ def _claude_cmd() -> tuple[list[str], bool]:
     return ["claude", "-p"], False
 
 
-async def claude_reply(card_id: int, card: dict, comment_text: str, trigger_comment_id: int):
-    cmd, found = _claude_cmd()
-    if not found:
-        reply_text = (
-            "⚠️ Error: Claude CLI was not found on your system PATH.\n\n"
-            "To fix this:\n"
-            "1. Install the Claude CLI (`npm install -g @anthropic-ai/claude-code`)\n"
-            "2. Ensure it is in your Windows Environment PATH.\n"
-            "3. Or, if you use a different name/path, update `_claude_cmd` in `main.py`."
-        )
-    else:
-        thread = _fetch_thread(trigger_comment_id)
-        prompt = _build_claude_prompt(card, comment_text, thread)
-        try:
-            # Use subprocess.run in a thread — more reliable than
-            # asyncio.create_subprocess_exec on Windows for .cmd wrappers.
-            loop = asyncio.get_running_loop()
-            def _run():
-                result = subprocess.run(
-                    cmd,
-                    input=prompt.encode("utf-8"),
-                    capture_output=True,
-                    timeout=120,
-                )
-                if result.returncode == 0:
-                    return result.stdout.decode("utf-8").strip()
-                return f"⚠️ {result.stderr.decode('utf-8').strip()}"
-            reply_text = await loop.run_in_executor(None, _run)
-        except subprocess.TimeoutExpired:
-            reply_text = "⚠️ Request timed out after 120 seconds. Claude CLI might be hanging or your internet is very slow."
-        except Exception as e:
-            reply_text = f"⚠️ Error running Claude CLI: {str(e)}"
-
-    conn = database.get_db()
-    try:
-        conn.execute(
-            "INSERT INTO comments (card_id, author, text, reply_to_id) VALUES (?,?,?,?)",
-            (card_id, "claude", reply_text, trigger_comment_id),
-        )
-        conn.execute(
-            "UPDATE comments SET claude_handled=1 WHERE id=?",
-            (trigger_comment_id,),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-
 # ── Claude streaming endpoint ─────────────────────────────────────────────────
 
 @app.get("/api/claude-stream/{comment_id}")
@@ -668,7 +614,6 @@ async def claude_stream(comment_id: int):
 
     def _sse(text: str) -> str:
         """JSON-encode chunk so newlines are never stripped by SSE parser."""
-        import json
         return f"data: {json.dumps(text)}\n\n"
 
     async def generate():

@@ -31,7 +31,8 @@ button,input,select,textarea{font-family:'DM Sans',sans-serif}
   --danger:#e05454;
   --claude:#7c4dff;
   --claude-dim:rgba(124,77,255,0.1);
-  --r:10px;--r-sm:6px;
+  --r:10px;--r-sm:6px;--r-md:8px;
+  --text-1:#0d0c0b;
 }
 
 html,body{height:100%;overflow:hidden}
@@ -620,7 +621,6 @@ let archive = [];
 let dragId = null, dragFrom = null, dragOverTarget = null;
 let detailCardId = null, detailColId = null;
 const activeStreams = new Map(); // comment id → EventSource
-let lastSavedHash = '';
 let sortBy = null; // null | 'priority' | 'dueDate'
 
 const PRIORITY_ORDER = { high: 0, medium: 1, low: 2 };
@@ -658,6 +658,10 @@ async function api(path, method = 'GET', body = null) {
   return res.status === 204 ? null : res.json();
 }
 
+function toFeCard(raw) {
+  return { ...raw, dueDate: raw.due_date, id: String(raw.id) };
+}
+
 async function loadData() {
   try {
     const board = await api('/board');
@@ -683,6 +687,7 @@ async function loadData() {
       }
     });
     data = newData;
+    archive = await api('/archive');
     render();
   } catch (e) {
     console.error('Failed to load board:', e);
@@ -737,9 +742,6 @@ function fmtTime(ts) {
          d.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'});
 }
 
-function highlightAtClaude(text) {
-  return esc(text).replace(/@claude/gi, '<span class="at-claude">@claude</span>');
-}
 
 function formatComment(text) {
   if (!text) return '';
@@ -972,7 +974,7 @@ function renderStats() {
 // ─── Archive ─────────────────────────────────────────────────────────────────
 async function archiveCard(colId, cardId) {
   try {
-    await api(`/cards/${cardId}`, 'PATCH', { archived: true });
+    await api(`/cards/${cardId}/archive`, 'PATCH', { archived: true });
     loadData(); // Re-fetch everything to be safe
     if (detailCardId === cardId) closeDetail();
   } catch (e) {
@@ -980,10 +982,9 @@ async function archiveCard(colId, cardId) {
   }
 }
 
-async function restoreCard(archiveIdx) {
-  // This is a bit tricky since archive is now in DB.
-  // For personal use, I'll assume users can un-archive via the DB or a future UI.
-  // But let's keep the UI consistent for now.
+async function restoreCard(cardId) {
+  await api(`/cards/${cardId}/archive`, 'PATCH', { archived: false });
+  loadData();
 }
 
 function renderArchivePanel() {
@@ -1003,16 +1004,17 @@ function renderArchivePanel() {
           <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
           ${esc(card.project)}</div>` : ''}
         <div class="archive-row-title">${esc(card.title)}</div>
-        <div class="archive-row-meta">from ${COLS.find(c=>c.id===card.archivedFrom)?.label||card.archivedFrom} · ${fmtTime(card.archivedAt)}</div>
+        <div class="archive-row-meta">from ${esc(card.column_name)} · ${fmtTime(card.updated_at)}</div>
       </div>
       <button class="btn-restore">↺ Restore</button>
     `;
-    row.querySelector('.btn-restore').addEventListener('click', () => restoreCard(i));
+    row.querySelector('.btn-restore').addEventListener('click', () => restoreCard(card.id));
     body.appendChild(row);
   });
 }
 
-document.getElementById('btn-archive').addEventListener('click', () => {
+document.getElementById('btn-archive').addEventListener('click', async () => {
+  archive = await api('/archive');
   renderArchivePanel();
   document.getElementById('archive-panel').classList.toggle('open');
   document.getElementById('panel-overlay').classList.toggle('open',
@@ -1703,8 +1705,7 @@ async function addComment(card, text, replyToId = null) {
       reply_to_id: replyToId ? Number(replyToId) : null
     });
     // Refresh card to get comments
-    const updated = await api(`/cards/${card.id}`);
-    const feCard = { ...updated, dueDate: updated.due_date, id: String(updated.id) };
+    const feCard = toFeCard(await api(`/cards/${card.id}`));
 
     // Update local data
     for (const col of COLS) {
@@ -1774,7 +1775,7 @@ function startClaudeStream(commentId, card) {
     es.close();
     activeStreams.delete(commentId);
     api(`/cards/${card.id}`).then(updated => {
-      const feCard = { ...updated, dueDate: updated.due_date, id: String(updated.id) };
+      const feCard = toFeCard(updated);
       for (const col of COLS) {
         const idx = data[col.id].findIndex(c => String(c.id) === String(feCard.id));
         if (idx !== -1) { data[col.id][idx] = feCard; break; }
@@ -1937,8 +1938,7 @@ function showReplyInput(parentEl, replyToId, card, parentAuthor) {
 setInterval(async () => {
   if (detailCardId) {
     try {
-      const card = await api(`/cards/${detailCardId}`);
-      const feCard = { ...card, dueDate: card.due_date, id: card.id };
+      const feCard = toFeCard(await api(`/cards/${detailCardId}`));
       const oldCmts = (getDetailCard() || {}).comments || [];
       if (feCard.comments.length !== oldCmts.length) {
          const isTyping = document.activeElement && (
@@ -1959,12 +1959,6 @@ setInterval(async () => {
   }
 }, 3000);
 
-function getCurrentColumn(cardId) {
-  for (const col of COLS) {
-    if (data[col.id]?.find(c => c.id === cardId)) return col.id;
-  }
-  return null;
-}
 
 function setSyncStatus(status) {
   const dot = document.getElementById('sync-dot');
