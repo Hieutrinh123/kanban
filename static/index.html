@@ -386,6 +386,7 @@ input[type="date"].dp-input-sm{color-scheme:light}
 .comment-list{display:flex;flex-direction:column;gap:12px}
 .comment-item{display:flex;gap:10px}
 .comment-item.claude-reply{flex-direction:column;padding:10px;background:#f0eeff;border-radius:var(--r);border:1px solid rgba(124,77,255,0.15)}
+.reply-item.claude-reply{background:#f0eeff;border-radius:var(--r);border:1px solid rgba(124,77,255,0.15);padding:8px 10px}
 .comment-meta{display:flex;align-items:center;gap:6px;margin-bottom:4px}
 .comment-author{font-size:11.5px;font-weight:700;color:var(--text)}
 .comment-author.claude{color:var(--claude)}
@@ -1704,17 +1705,85 @@ async function addComment(card, text, replyToId = null) {
     // Refresh card to get comments
     const updated = await api(`/cards/${card.id}`);
     const feCard = { ...updated, dueDate: updated.due_date, id: String(updated.id) };
-    
+
     // Update local data
     for (const col of COLS) {
       const idx = data[col.id].findIndex(c => String(c.id) === String(card.id));
       if (idx !== -1) { data[col.id][idx] = feCard; break; }
     }
-    
+
     renderComments(document.getElementById('dp-comments'), feCard);
+
+    // If @claude was mentioned, stream the reply live
+    if (text.toLowerCase().includes('@claude') && !activeStreams.has(cmt.id)) {
+      startClaudeStream(cmt.id, card);
+    }
   } catch (e) {
     console.error('Add comment failed:', e);
   }
+}
+
+function startClaudeStream(commentId, card) {
+  if (activeStreams.has(commentId)) return;
+
+  // Insert a dots bubble as a reply under the trigger comment
+  const thread = document.createElement('div');
+  thread.className = 'comment-thread';
+  thread.dataset.streamFor = commentId;
+
+  thread.innerHTML = `
+    <div class="reply-item claude-reply">
+      <div class="avatar-claude">✦</div>
+      <div style="flex:1;min-width:0">
+        <div class="comment-meta"><span class="comment-author">Claude</span></div>
+        <div class="comment-bubble"><span class="stream-dots"></span></div>
+      </div>
+    </div>
+  `;
+
+  const container = document.getElementById('dp-comments');
+  const list = container?.querySelector('.comment-list');
+  const triggerEl = list?.querySelector(`[data-id="${commentId}"]`);
+  if (triggerEl) triggerEl.after(thread);
+  else if (list) list.prepend(thread);
+
+  // Animate dots
+  const dotsEl = thread.querySelector('.stream-dots');
+  const DOT_STATES = ['●', '●●', '●●●'];
+  let dotFrame = 0;
+  const dotTimer = setInterval(() => {
+    dotsEl.textContent = DOT_STATES[dotFrame++ % 3];
+  }, 400);
+
+  let done = false;
+  const es = new EventSource(`/api/claude-stream/${commentId}`);
+  activeStreams.set(commentId, es);
+
+  const finish = () => {
+    clearInterval(dotTimer);
+    es.close();
+    activeStreams.delete(commentId);
+    api(`/cards/${card.id}`).then(updated => {
+      const feCard = { ...updated, dueDate: updated.due_date, id: String(updated.id) };
+      for (const col of COLS) {
+        const idx = data[col.id].findIndex(c => String(c.id) === String(feCard.id));
+        if (idx !== -1) { data[col.id][idx] = feCard; break; }
+      }
+      renderComments(document.getElementById('dp-comments'), feCard);
+    });
+  };
+
+  es.onmessage = (e) => {
+    if (e.data === '[DONE]') { done = true; finish(); }
+  };
+
+  es.onerror = () => {
+    if (done) return;
+    clearInterval(dotTimer);
+    es.close();
+    activeStreams.delete(commentId);
+    dotsEl.textContent = '⚠️ Error — will retry via polling';
+  };
 }
 
 function renderComments(container, card) {
@@ -1837,10 +1906,11 @@ setInterval(async () => {
       const card = await api(`/cards/${detailCardId}`);
       const feCard = { ...card, dueDate: card.due_date, id: card.id };
       const oldCmts = (getDetailCard() || {}).comments || [];
-      if (feCard.comments.length !== oldCmts.length) {
-         // Avoid wiping if user is typing
+      const hasStreamBubble = !!document.querySelector('[data-stream-for]');
+      const countChanged = feCard.comments.length !== oldCmts.length;
+      if (countChanged || hasStreamBubble) {
          const isTyping = document.activeElement && (
-           document.activeElement.classList.contains('comment-input') || 
+           document.activeElement.classList.contains('comment-input') ||
            document.activeElement.classList.contains('reply-input') ||
            document.activeElement.classList.contains('dp-title-input') ||
            document.activeElement.classList.contains('dp-notes')
@@ -1848,7 +1918,6 @@ setInterval(async () => {
          if (!isTyping) {
            renderComments(document.getElementById('dp-comments'), feCard);
          }
-         
          for (const col of COLS) {
            const idx = data[col.id].findIndex(c => String(c.id) === String(detailCardId));
            if (idx !== -1) { data[col.id][idx] = feCard; break; }

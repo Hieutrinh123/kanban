@@ -1,15 +1,31 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import shutil
 import subprocess
 import sys
+import threading
+import traceback
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
+# ── Logging setup ─────────────────────────────────────────────────────────────
+LOG_PATH = Path(__file__).parent / "server.log"
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler(LOG_PATH, encoding="utf-8"),
+        logging.StreamHandler(sys.stdout),
+    ],
+)
+log = logging.getLogger("kanban")
 
 import database
 
@@ -436,7 +452,7 @@ def get_comments(card_id: int):
 
 
 @app.post("/api/cards/{card_id}/comments", status_code=201)
-def create_comment(card_id: int, body: CommentCreate, background_tasks: BackgroundTasks):
+def create_comment(card_id: int, body: CommentCreate):
     conn = database.get_db()
     try:
         card = conn.execute("SELECT * FROM cards WHERE id=?", (card_id,)).fetchone()
@@ -448,10 +464,7 @@ def create_comment(card_id: int, body: CommentCreate, background_tasks: Backgrou
             (card_id, "user", body.text, has_at_claude, body.reply_to_id),
         )
         conn.commit()
-        comment = dict(conn.execute("SELECT * FROM comments WHERE id=?", (cur.lastrowid,)).fetchone())
-        if has_at_claude:
-            background_tasks.add_task(claude_reply, card_id, dict(card), body.text, cur.lastrowid)
-        return comment
+        return dict(conn.execute("SELECT * FROM comments WHERE id=?", (cur.lastrowid,)).fetchone())
     finally:
         conn.close()
 
@@ -616,6 +629,143 @@ async def claude_reply(card_id: int, card: dict, comment_text: str, trigger_comm
         conn.execute(
             "UPDATE comments SET claude_handled=1 WHERE id=?",
             (trigger_comment_id,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ── Claude streaming endpoint ─────────────────────────────────────────────────
+
+@app.get("/api/claude-stream/{comment_id}")
+async def claude_stream(comment_id: int):
+    """Stream Claude's reply token-by-token as SSE, then persist to DB."""
+    conn = database.get_db()
+    try:
+        cmt = conn.execute("SELECT * FROM comments WHERE id=?", (comment_id,)).fetchone()
+        if not cmt:
+            raise HTTPException(404, "Comment not found")
+        cmt = dict(cmt)
+        card = conn.execute("SELECT * FROM cards WHERE id=?", (cmt["card_id"],)).fetchone()
+        if not card:
+            raise HTTPException(404, "Card not found")
+        card = dict(card)
+    finally:
+        conn.close()
+
+    def _sse(text: str) -> str:
+        """JSON-encode chunk so newlines are never stripped by SSE parser."""
+        import json
+        return f"data: {json.dumps(text)}\n\n"
+
+    async def generate():
+        try:
+            cmd, found = _claude_cmd()
+            log.info(f"[stream:{comment_id}] Starting — claude found={found}, cmd={cmd}")
+
+            if not found:
+                error_text = (
+                    "⚠️ Claude CLI not found on PATH.\n\n"
+                    "Fix: npm install -g @anthropic-ai/claude-code, then restart the server."
+                )
+                log.error(f"[stream:{comment_id}] Claude CLI not found")
+                yield _sse(error_text)
+                _persist(cmt["card_id"], comment_id, error_text)
+                yield "data: [DONE]\n\n"
+                return
+
+            # Fetch parent context
+            parent_text = None
+            if cmt.get("reply_to_id"):
+                conn2 = database.get_db()
+                try:
+                    parent = conn2.execute(
+                        "SELECT text FROM comments WHERE id=?", (cmt["reply_to_id"],)
+                    ).fetchone()
+                    if parent:
+                        parent_text = parent["text"]
+                finally:
+                    conn2.close()
+
+            prompt = _build_claude_prompt(card, cmt["text"], parent_text)
+            log.info(f"[stream:{comment_id}] Prompt built ({len(prompt)} chars), launching Claude")
+
+            loop = asyncio.get_running_loop()
+            queue: asyncio.Queue = asyncio.Queue()
+
+            def _producer():
+                try:
+                    proc = subprocess.Popen(
+                        cmd,
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                    )
+                    proc.stdin.write(prompt.encode("utf-8"))
+                    proc.stdin.close()
+                    byte_count = 0
+                    while True:
+                        chunk = proc.stdout.read(64)
+                        if not chunk:
+                            break
+                        byte_count += len(chunk)
+                        loop.call_soon_threadsafe(
+                            queue.put_nowait, chunk.decode("utf-8", errors="replace")
+                        )
+                    proc.wait()
+                    log.info(f"[stream:{comment_id}] Claude exited code={proc.returncode}, bytes={byte_count}")
+                    if proc.returncode != 0:
+                        err = proc.stderr.read().decode("utf-8", errors="replace").strip()
+                        log.error(f"[stream:{comment_id}] Claude stderr: {err}")
+                        if err:
+                            loop.call_soon_threadsafe(queue.put_nowait, f"\n\n⚠️ Claude error: {err}")
+                except Exception as exc:
+                    tb = traceback.format_exc()
+                    log.error(f"[stream:{comment_id}] Producer exception: {tb}")
+                    loop.call_soon_threadsafe(queue.put_nowait, f"\n\n⚠️ Server error: {exc}")
+                finally:
+                    loop.call_soon_threadsafe(queue.put_nowait, None)  # sentinel
+
+            threading.Thread(target=_producer, daemon=True).start()
+
+            full_parts: list[str] = []
+            while True:
+                chunk = await queue.get()
+                if chunk is None:
+                    break
+                full_parts.append(chunk)
+                yield _sse(chunk)
+
+            full_reply = "".join(full_parts)
+            log.info(f"[stream:{comment_id}] Done — {len(full_reply)} chars, persisting to DB")
+            _persist(cmt["card_id"], comment_id, full_reply)
+            yield "data: [DONE]\n\n"
+
+        except Exception as exc:
+            tb = traceback.format_exc()
+            log.error(f"[stream:{comment_id}] Unhandled exception in generate():\n{tb}")
+            try:
+                yield _sse(f"⚠️ Server error: {exc}")
+                yield "data: [DONE]\n\n"
+            except Exception:
+                pass
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+def _persist(card_id: int, trigger_comment_id: int, reply_text: str):
+    conn = database.get_db()
+    try:
+        conn.execute(
+            "INSERT INTO comments (card_id, author, text, reply_to_id) VALUES (?,?,?,?)",
+            (card_id, "claude", reply_text, trigger_comment_id),
+        )
+        conn.execute(
+            "UPDATE comments SET claude_handled=1 WHERE id=?", (trigger_comment_id,)
         )
         conn.commit()
     finally:
