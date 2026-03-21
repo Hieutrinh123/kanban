@@ -1846,7 +1846,7 @@ setInterval(async () => {
            document.activeElement.classList.contains('dp-notes')
          );
          if (!isTyping) {
-           renderComments(document.querySelector('#dp-body .dp-sec-label:last-of-type')?.parentElement, feCard);
+           renderComments(document.getElementById('dp-comments'), feCard);
          }
          
          for (const col of COLS) {

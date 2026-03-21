@@ -29,23 +29,28 @@ async def browse_file():
     if sys.platform == "win32":
         # Tkinter cannot be used from a thread executor on Windows.
         # Use a PowerShell WinForms form for the whole flow.
-        # One dialog for both files and folders:
-        # navigate to a file → click Open = select file
-        # navigate INTO a folder → click Open = select that folder
+        # One dialog for both files and folders.
+        # A TopMost invisible owner form forces the dialog in front of the browser.
         ps = (
             "Add-Type -AssemblyName System.Windows.Forms;"
+            "$owner=New-Object System.Windows.Forms.Form;"
+            "$owner.TopMost=$true;"
+            "$owner.WindowState='Minimized';"
+            "$owner.ShowInTaskbar=$false;"
+            "$owner.Show();"
             "$d=New-Object System.Windows.Forms.OpenFileDialog;"
             "$d.Title='Select a file or folder';"
             "$d.ValidateNames=$false;"
             "$d.CheckFileExists=$false;"
             "$d.CheckPathExists=$false;"
             "$d.FileName='Select Folder.';"
-            "if($d.ShowDialog()-eq'OK'){"
+            "if($d.ShowDialog($owner)-eq'OK'){"
             "  $p=$d.FileName;"
             "  if([System.IO.File]::Exists($p)){$p}"
             "  elseif([System.IO.Directory]::Exists($p)){$p}"
             "  else{Split-Path $p}"
-            "}else{''}"
+            "}else{''};"
+            "$owner.Dispose();"
         )
 
         def _run():
