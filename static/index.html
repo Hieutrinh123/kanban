@@ -431,6 +431,7 @@ input[type="date"].dp-input-sm{color-scheme:light}
 
 /* ── Reply thread ── */
 .comment-thread{margin-top:10px;margin-left:26px;padding-left:16px;border-left:2px solid var(--border-2);display:flex;flex-direction:column;gap:10px}
+.comment-thread .comment-thread{margin-top:8px;margin-left:16px;padding-left:12px;border-left:2px solid var(--border)}
 .reply-item{display:flex;gap:8px}
 .reply-input-wrap{display:flex;align-items:flex-start;gap:8px;margin-top:8px;padding-left:14px;border-left:2px solid var(--border)}
 .reply-input{flex:1;border:1px solid var(--border);border-radius:var(--r-sm);padding:6px 10px;font-size:12px;color:var(--text);background:var(--surface-2);outline:none;resize:none;line-height:1.5;transition:border-color 0.15s}
@@ -1726,28 +1727,38 @@ function startClaudeStream(commentId, card) {
   if (activeStreams.has(commentId)) return;
 
   // Insert a dots bubble as a reply under the trigger comment
-  const thread = document.createElement('div');
-  thread.className = 'comment-thread';
-  thread.dataset.streamFor = commentId;
-
-  thread.innerHTML = `
-    <div class="reply-item claude-reply">
-      <div class="avatar-claude">✦</div>
-      <div style="flex:1;min-width:0">
-        <div class="comment-meta"><span class="comment-author">Claude</span></div>
-        <div class="comment-bubble"><span class="stream-dots"></span></div>
-      </div>
+  const bubble = document.createElement('div');
+  bubble.className = 'reply-item claude-reply';
+  bubble.dataset.streamFor = commentId;
+  bubble.innerHTML = `
+    <div class="avatar-claude">✦</div>
+    <div style="flex:1;min-width:0">
+      <div class="comment-meta"><span class="comment-author">Claude</span></div>
+      <div class="comment-bubble"><span class="stream-dots"></span></div>
     </div>
   `;
 
   const container = document.getElementById('dp-comments');
   const list = container?.querySelector('.comment-list');
   const triggerEl = list?.querySelector(`[data-id="${commentId}"]`);
-  if (triggerEl) triggerEl.after(thread);
-  else if (list) list.prepend(thread);
+  if (triggerEl && triggerEl.classList.contains('comment-item')) {
+    // Top-level trigger: wrap bubble in a thread
+    const wrapper = document.createElement('div');
+    wrapper.className = 'comment-thread';
+    wrapper.appendChild(bubble);
+    triggerEl.after(wrapper);
+  } else if (triggerEl) {
+    // Reply trigger: insert bubble directly in the existing thread (same or nested level)
+    triggerEl.after(bubble);
+  } else if (list) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'comment-thread';
+    wrapper.appendChild(bubble);
+    list.prepend(wrapper);
+  }
 
   // Animate dots
-  const dotsEl = thread.querySelector('.stream-dots');
+  const dotsEl = bubble.querySelector('.stream-dots');
   const DOT_STATES = ['●', '●●', '●●●'];
   let dotFrame = 0;
   const dotTimer = setInterval(() => {
@@ -1827,13 +1838,31 @@ function renderComments(container, card) {
   
   topLevels.forEach(cmt => {
     list.appendChild(buildCommentMarkup(cmt, card));
-    
-    // Replies
+
+    // Level-1 replies (direct replies to top-level)
     const replies = comments.filter(r => r.reply_to_id && String(r.reply_to_id) === String(cmt.id)).sort((a,b) => a.id - b.id);
     if (replies.length > 0) {
       const thread = document.createElement('div');
       thread.className = 'comment-thread';
-      replies.forEach(r => thread.appendChild(buildCommentMarkup(r, card, true)));
+      // Collect all descendants of a reply (any depth), sorted by id
+      const collectDescendants = (parentId) => {
+        const children = comments.filter(s => String(s.reply_to_id) === String(parentId)).sort((a,b) => a.id - b.id);
+        const result = [];
+        children.forEach(c => { result.push(c); result.push(...collectDescendants(c.id)); });
+        return result;
+      };
+
+      replies.forEach(r => {
+        thread.appendChild(buildCommentMarkup(r, card, true));
+
+        const descendants = collectDescendants(r.id);
+        if (descendants.length > 0) {
+          const subThread = document.createElement('div');
+          subThread.className = 'comment-thread';
+          descendants.forEach(s => subThread.appendChild(buildCommentMarkup(s, card, true)));
+          thread.appendChild(subThread);
+        }
+      });
       list.appendChild(thread);
     }
   });
@@ -1854,34 +1883,38 @@ function buildCommentMarkup(cmt, card, isReply = false) {
       <div class="comment-meta">
         <span class="comment-author">${cmt.author === 'claude' ? 'Claude' : 'Hieu'}</span>
         <span class="comment-time">${time}</span>
-        ${!isReply ? `<button class="comment-act reply-btn" style="margin-left:8px">Reply</button>` : ''}
-        ${cmt.has_at_claude && !cmt.claude_handled ? '<span class="comment-pending">⏳ waiting for Claude…</span>' : ''}
+        ${(!isReply || cmt.author === 'claude') ? `<button class="comment-act reply-btn" style="margin-left:8px">Reply</button>` : ''}
       </div>
       <div class="comment-bubble" style="overflow-wrap: break-word;">${formatComment(cmt.text)}</div>
     </div>
   `;
 
-  if (!isReply) {
-    item.querySelector('.reply-btn').onclick = () => showReplyInput(item, cmt.id, card);
+  if (!isReply || cmt.author === 'claude') {
+    item.querySelector('.reply-btn').onclick = () => showReplyInput(item, cmt.id, card, cmt.author);
   }
 
   return item;
 }
 
-function showReplyInput(parentEl, replyToId, card) {
+function showReplyInput(parentEl, replyToId, card, parentAuthor) {
   let existing = parentEl.nextElementSibling;
   if (existing?.classList.contains('reply-input-wrap')) {
     existing.remove();
     return;
   }
-  
+
   const wrap = document.createElement('div');
   wrap.className = 'reply-input-wrap';
   wrap.innerHTML = `
     <textarea class="reply-input" placeholder="Type a reply…"></textarea>
     <button class="reply-send">Reply</button>
   `;
-  
+
+  if (parentAuthor === 'claude') {
+    const ta = wrap.querySelector('.reply-input');
+    ta.value = '@claude ';
+  }
+
   const doReply = async () => {
     const txt = wrap.querySelector('.reply-input').value.trim();
     if (txt) {
@@ -1895,7 +1928,9 @@ function showReplyInput(parentEl, replyToId, card) {
   });
 
   parentEl.after(wrap);
-  wrap.querySelector('.reply-input').focus();
+  const ta = wrap.querySelector('.reply-input');
+  ta.focus();
+  ta.setSelectionRange(ta.value.length, ta.value.length);
 }
 
 // ─── Polling ─────────────────────────────────────────────────────────────────

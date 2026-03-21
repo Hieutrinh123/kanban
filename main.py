@@ -495,7 +495,28 @@ def delete_comment(comment_id: int):
 
 # ── Claude reply background task ──────────────────────────────────────────────
 
-def _build_claude_prompt(card: dict, comment_text: str, parent_text: str = None) -> str:
+def _fetch_thread(comment_id: int) -> list[dict]:
+    """Walk up reply_to_id chain from comment_id, return oldest-first list."""
+    conn = database.get_db()
+    try:
+        thread = []
+        current_id = comment_id
+        while current_id:
+            row = conn.execute(
+                "SELECT id, author, text, reply_to_id FROM comments WHERE id=?",
+                (current_id,)
+            ).fetchone()
+            if not row:
+                break
+            thread.append(dict(row))
+            current_id = row["reply_to_id"]
+        thread.reverse()
+        return thread
+    finally:
+        conn.close()
+
+
+def _build_claude_prompt(card: dict, comment_text: str, thread: list[dict] = None) -> str:
     lines = [
         "You are an AI assistant embedded in a Kanban board. Respond concisely and helpfully.",
         "",
@@ -547,8 +568,11 @@ def _build_claude_prompt(card: dict, comment_text: str, parent_text: str = None)
                 lines.append(f"\n## Referenced File Error")
                 lines.append(f"Could not read {fpath.name}: {str(e)}")
 
-    if parent_text:
-        lines += ["", "## Discussion Context (Previous Comment)", parent_text]
+    if thread:
+        lines += ["", "## Conversation Thread (oldest first)"]
+        for msg in thread[:-1]:  # exclude the triggering comment itself
+            author = "Claude" if msg["author"] == "claude" else "User"
+            lines += [f"**{author}:** {msg['text']}", ""]
 
     lines += [
         "",
@@ -587,19 +611,8 @@ async def claude_reply(card_id: int, card: dict, comment_text: str, trigger_comm
             "3. Or, if you use a different name/path, update `_claude_cmd` in `main.py`."
         )
     else:
-        # Fetch parent context if this is a reply
-        conn = database.get_db()
-        parent_text = None
-        try:
-            trigger_cmt = conn.execute("SELECT reply_to_id FROM comments WHERE id=?", (trigger_comment_id,)).fetchone()
-            if trigger_cmt and trigger_cmt["reply_to_id"]:
-                parent = conn.execute("SELECT text FROM comments WHERE id=?", (trigger_cmt["reply_to_id"],)).fetchone()
-                if parent:
-                    parent_text = parent["text"]
-        finally:
-            conn.close()
-
-        prompt = _build_claude_prompt(card, comment_text, parent_text)
+        thread = _fetch_thread(trigger_comment_id)
+        prompt = _build_claude_prompt(card, comment_text, thread)
         try:
             # Use subprocess.run in a thread — more reliable than
             # asyncio.create_subprocess_exec on Windows for .cmd wrappers.
@@ -674,20 +687,8 @@ async def claude_stream(comment_id: int):
                 yield "data: [DONE]\n\n"
                 return
 
-            # Fetch parent context
-            parent_text = None
-            if cmt.get("reply_to_id"):
-                conn2 = database.get_db()
-                try:
-                    parent = conn2.execute(
-                        "SELECT text FROM comments WHERE id=?", (cmt["reply_to_id"],)
-                    ).fetchone()
-                    if parent:
-                        parent_text = parent["text"]
-                finally:
-                    conn2.close()
-
-            prompt = _build_claude_prompt(card, cmt["text"], parent_text)
+            thread = _fetch_thread(comment_id)
+            prompt = _build_claude_prompt(card, cmt["text"], thread)
             log.info(f"[stream:{comment_id}] Prompt built ({len(prompt)} chars), launching Claude")
 
             loop = asyncio.get_running_loop()
