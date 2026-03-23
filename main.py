@@ -543,7 +543,7 @@ def _build_claude_prompt(card: dict, comment_text: str, thread: list[dict] = Non
     finally:
         conn.close()
 
-    # Include referenced file content if path is provided
+    # Include referenced file/folder content if path is provided
     if card.get("file_path"):
         fpath = Path(card["file_path"])
         if fpath.exists() and fpath.is_file():
@@ -561,6 +561,28 @@ def _build_claude_prompt(card: dict, comment_text: str, thread: list[dict] = Non
             except Exception as e:
                 lines.append(f"\n## Referenced File Error")
                 lines.append(f"Could not read {fpath.name}: {str(e)}")
+        elif fpath.exists() and fpath.is_dir():
+            TEXT_EXTS = {".md", ".txt", ".rst", ".csv", ".json", ".yaml", ".yml", ".toml", ".html", ".htm"}
+            lines.append(f"\n## Referenced Folder: {fpath} ")
+            doc_files = [f for f in sorted(fpath.iterdir()) if f.is_file() and f.suffix.lower() in TEXT_EXTS]
+            all_files = [f for f in sorted(fpath.iterdir()) if f.is_file()]
+            if not all_files:
+                lines.append("(Folder is empty)")
+            else:
+                lines.append(f"Files in folder: {', '.join(f.name for f in all_files)}")
+                total = 0
+                for f in doc_files:
+                    try:
+                        size = f.stat().st_size
+                        if size < 50_000 and total < 200_000:
+                            content = f.read_text(errors="replace")
+                            lines.append(f"\n### {f.name}")
+                            lines.append("```")
+                            lines.append(content)
+                            lines.append("```")
+                            total += size
+                    except Exception:
+                        pass
 
     if thread:
         lines += ["", "## Conversation Thread (oldest first)"]
@@ -646,6 +668,7 @@ async def claude_stream(comment_id: int):
                         stdin=subprocess.PIPE,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
+                        cwd=Path.home(),
                     )
                     proc.stdin.write(prompt.encode("utf-8"))
                     proc.stdin.close()
