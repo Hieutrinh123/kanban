@@ -9,7 +9,7 @@ import sys
 import threading
 import traceback
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
@@ -117,6 +117,7 @@ class CardUpdate(BaseModel):
     project: Optional[str] = None
     assignee: Optional[str] = None
     file_path: Optional[str] = None
+    subtasks: Optional[Any] = None
 
 
 class CardMove(BaseModel):
@@ -162,6 +163,7 @@ def get_card_full(conn, card_id: int):
     if not card:
         return None
     card = dict(card)
+    card["subtasks"] = json.loads(card.get("subtasks") or "[]")
     checklists = conn.execute(
         "SELECT * FROM checklists WHERE card_id=? ORDER BY position", (card_id,)
     ).fetchall()
@@ -208,7 +210,7 @@ def get_board():
                 """,
                 (col["id"],),
             ).fetchall()
-            col["cards"] = [dict(c) for c in cards]
+            col["cards"] = [{**dict(c), "subtasks": json.loads(c["subtasks"] or "[]")} for c in cards]
             result.append(col)
         return result
     finally:
@@ -255,6 +257,8 @@ def update_card(card_id: int, body: CardUpdate):
         if not card:
             raise HTTPException(404, "Card not found")
         updates = {k: v for k, v in body.model_dump().items() if k in body.model_fields_set}
+        if "subtasks" in updates:
+            updates["subtasks"] = json.dumps(updates["subtasks"] or [])
         if not updates:
             return get_card_full(conn, card_id)
         set_parts = [f"{k}=?" for k in updates]
