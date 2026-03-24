@@ -676,7 +676,8 @@ async function loadData() {
         newData[feId] = col.cards.map(c => ({
           ...c,
           id: String(c.id), // Force string for comparison compatibility
-          dueDate: c.due_date
+          dueDate: c.due_date,
+          notes: c.description
         }));
         
         // Update COLS mapping
@@ -1077,7 +1078,7 @@ async function openDetail(colId, card) {
   if (card && card.id) {
     try {
       const updated = await api(`/cards/${card.id}`);
-      fullCard = { ...updated, dueDate: updated.due_date, id: String(updated.id) };
+      fullCard = { ...updated, dueDate: updated.due_date, id: String(updated.id), notes: updated.description };
       
       // Update local data so the board and panel stay in sync
       const idx = data[colId].findIndex(c => String(c.id) === String(card.id));
@@ -1111,6 +1112,14 @@ async function openDetail(colId, card) {
 }
 
 function closeDetail() {
+  // Save notes immediately if there's pending content
+  const notesEl = document.querySelector('#dp-body .dp-notes');
+  if (notesEl && detailCardId) {
+    clearTimeout(autoSaveTimer);
+    const backendVal = notesEl.value.trim();
+    api(`/cards/${detailCardId}`, 'PATCH', { description: backendVal }).catch(() => {});
+  }
+
   document.getElementById('detail-panel').classList.remove('open');
   if (!document.getElementById('archive-panel').classList.contains('open'))
     document.getElementById('panel-overlay').classList.remove('open');
@@ -1342,7 +1351,8 @@ function renderDetailBody(colId, card) {
   notesEl.className = 'dp-notes';
   notesEl.placeholder = 'Add notes, links, context…';
   notesEl.value = c.notes || '';
-  notesEl.addEventListener('change', () => { if (!isNew) autoSaveField('notes', notesEl.value.trim()); });
+  notesEl.addEventListener('input', () => { if (!isNew) autoSaveField('notes', notesEl.value.trim()); });
+  notesEl.addEventListener('blur', () => { if (!isNew) autoSaveField('notes', notesEl.value.trim()); });
   notesSec.appendChild(notesEl);
   body.appendChild(notesSec);
 
@@ -1413,7 +1423,7 @@ async function createTask(colId) {
     });
     
     // Map backend to frontend naming
-    const feCard = { ...card, dueDate: card.due_date, id: card.id };
+    const feCard = { ...card, dueDate: card.due_date, id: card.id, notes: card.description };
     data[colId].unshift(feCard);
     
     render();

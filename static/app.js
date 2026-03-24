@@ -185,7 +185,16 @@ async function openCard(cardId) {
   } catch (e) { console.error(e); }
 }
 
-function closeModal() {
+async function closeModal() {
+  // Auto-save description if it was being edited
+  const descTa = document.getElementById('desc-ta');
+  if (descTa && descTa.classList.contains('active') && currentCard) {
+    const desc = descTa.value;
+    try {
+      await api(`/cards/${currentCard.id}`, 'PATCH', { description: desc });
+      currentCard.description = desc;
+    } catch (e) { console.error(e); }
+  }
   stopCommentPoll();
   document.getElementById('modal-overlay').classList.add('hidden');
   currentCard = null;
@@ -224,7 +233,7 @@ function renderModal(card) {
 
         <!-- Description -->
         <div class="desc-section">
-          <div class="section-heading">&#128221; Description</div>
+          <div class="section-heading">&#128221; Description <button class="btn-edit-inline" onclick="editDesc()">Edit</button></div>
           <div id="desc-display" class="desc-display ${!card.description ? 'placeholder' : ''}"
                onclick="editDesc()">${card.description ? esc(card.description) : 'Add a more detailed description…'}</div>
           <textarea id="desc-ta" class="desc-textarea"
@@ -509,6 +518,7 @@ async function submitAddItem(clId) {
   try {
     const item = await api(`/checklists/${clId}/items`, 'POST', { text });
     document.getElementById(`cl-items-${clId}`).insertAdjacentHTML('beforeend', itemHTML(item));
+    document.getElementById(`item-${item.id}`).scrollIntoView({ block: 'nearest' });
     ta.value = '';
     ta.focus();
     recalcProgress(clId);
