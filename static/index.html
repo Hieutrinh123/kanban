@@ -92,7 +92,7 @@ header{
 
 /* ── Board ── */
 .board{
-  display:grid;grid-template-columns:repeat(4,1fr);gap:12px;
+  display:grid;grid-template-columns:repeat(4,1fr);grid-template-rows:1fr;gap:12px;
   padding:16px 20px;flex:1;min-height:0;overflow:hidden;
 }
 
@@ -153,6 +153,7 @@ header{
   transition:transform 0.15s,box-shadow 0.15s,border-color 0.15s;
   position:relative;overflow:hidden;
   animation:cardIn 0.16s ease;
+  flex-shrink:0;
 }
 @keyframes cardIn{from{opacity:0;transform:translateY(-3px)}to{opacity:1;transform:translateY(0)}}
 
