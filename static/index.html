@@ -477,6 +477,40 @@ input[type="date"].dp-input-sm{color-scheme:light}
 .sort-item.active{color:var(--orange);font-weight:600}
 .sort-item-check{width:14px;height:14px;flex-shrink:0}
 
+/* ── Filter Menu ── */
+.filter-menu{
+  position:absolute;top:50px;right:0;width:230px;
+  background:var(--surface);border:1px solid var(--border-2);border-radius:var(--r);
+  box-shadow:0 8px 32px rgba(0,0,0,0.12);z-index:300;
+  animation:fadeDown 0.15s ease;
+}
+.filter-menu-section{padding:10px 14px 6px;}
+.filter-menu-section+.filter-menu-section{border-top:1px solid var(--border);}
+.filter-section-label{font-size:10px;font-weight:700;letter-spacing:0.07em;text-transform:uppercase;color:var(--text-3);margin-bottom:6px;}
+.filter-chips{display:flex;flex-wrap:wrap;gap:5px;}
+.filter-chip{
+  display:inline-flex;align-items:center;gap:4px;
+  padding:3px 9px;border-radius:20px;font-size:11.5px;font-weight:500;
+  border:1px solid var(--border-2);background:transparent;color:var(--text-2);
+  cursor:pointer;transition:all 0.12s;
+}
+.filter-chip:hover{border-color:var(--orange);color:var(--orange);}
+.filter-chip.active{background:var(--orange);border-color:var(--orange);color:#fff;}
+.filter-chip.active-blue{background:#4e9de0;border-color:#4e9de0;color:#fff;}
+.filter-menu-footer{
+  padding:8px 14px;border-top:1px solid var(--border);
+  display:flex;justify-content:flex-end;
+}
+.filter-clear-btn{
+  font-size:11.5px;color:var(--text-3);background:none;border:none;
+  cursor:pointer;padding:2px 6px;border-radius:4px;transition:color 0.12s;
+}
+.filter-clear-btn:hover{color:var(--text);}
+.filter-active-dot{
+  width:6px;height:6px;border-radius:50%;background:var(--orange);
+  display:inline-block;margin-left:2px;vertical-align:middle;
+}
+
 /* ── Archive Panel ── */
 .archive-panel{
   position:fixed;top:0;right:0;bottom:0;width:380px;
@@ -576,6 +610,10 @@ input[type="date"].finput{color-scheme:light}
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M3 6h18M7 12h10M11 18h2"/></svg>
         Sort
       </button>
+      <button class="btn-hdr" id="btn-filter">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
+        Filter
+      </button>
       <button class="btn-hdr" id="btn-archive">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
         Archive
@@ -626,8 +664,46 @@ let dragId = null, dragFrom = null, dragOverTarget = null;
 let detailCardId = null, detailColId = null;
 const activeStreams = new Map(); // comment id → EventSource
 let sortBy = null; // null | 'priority' | 'dueDate'
+let filters = { projects: new Set(), dueDates: new Set(), priorities: new Set() };
 
 const PRIORITY_ORDER = { high: 0, medium: 1, low: 2 };
+
+function filteredCards(cards) {
+  const { projects, dueDates, priorities } = filters;
+  if (!projects.size && !dueDates.size && !priorities.size) return cards;
+  return cards.filter(card => {
+    if (projects.size && !projects.has(card.project || '')) return false;
+    if (priorities.size && !priorities.has(card.priority || 'none')) return false;
+    if (dueDates.size) {
+      const today = new Date(); today.setHours(0,0,0,0);
+      const tomorrow = new Date(today); tomorrow.setDate(today.getDate()+1);
+      const weekEnd = new Date(today); weekEnd.setDate(today.getDate()+7);
+      const due = card.dueDate ? new Date(card.dueDate) : null;
+      let match = false;
+      if (dueDates.has('none') && !due) match = true;
+      if (due) {
+        if (dueDates.has('overdue') && due < today) match = true;
+        if (dueDates.has('today') && due >= today && due < tomorrow) match = true;
+        if (dueDates.has('week') && due >= today && due < weekEnd) match = true;
+      }
+      if (!match) return false;
+    }
+    return true;
+  });
+}
+
+function activeFilterCount() {
+  return filters.projects.size + filters.dueDates.size + filters.priorities.size;
+}
+
+function updateFilterBtn() {
+  const btn = document.getElementById('btn-filter');
+  if (!btn) return;
+  const count = activeFilterCount();
+  const dot = count ? `<span class="filter-active-dot"></span>` : '';
+  btn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg> Filter${dot}`;
+  btn.style.color = count ? 'var(--orange)' : '';
+}
 
 function sortedCards(cards) {
   if (!sortBy) return cards;
@@ -765,7 +841,7 @@ function render() {
 }
 
 function buildColumn(col) {
-  const cards = sortedCards(data[col.id] || []);
+  const cards = filteredCards(sortedCards(data[col.id] || []));
   const wrap = document.createElement('div');
   wrap.className = 'column';
   wrap.dataset.col = col.id;
@@ -1072,6 +1148,83 @@ document.getElementById('btn-sort').addEventListener('click', e => {
   btn.parentElement.appendChild(menu);
   setTimeout(() => document.addEventListener('click', function h() {
     document.getElementById('sort-menu')?.remove();
+    document.removeEventListener('click', h);
+  }), 0);
+});
+
+// ─── Filter ───────────────────────────────────────────────────────────────────
+document.getElementById('btn-filter').addEventListener('click', e => {
+  e.stopPropagation();
+  const existing = document.getElementById('filter-menu');
+  if (existing) { existing.remove(); return; }
+
+  const btn = document.getElementById('btn-filter');
+  const menu = document.createElement('div');
+  menu.id = 'filter-menu';
+  menu.className = 'filter-menu';
+
+  // Gather unique projects from all columns
+  const allCards = Object.values(data).flat();
+  const uniqueProjects = [...new Set(allCards.map(c => c.project || '').filter(p => p))];
+
+  function makeSection(title, chips) {
+    const sec = document.createElement('div');
+    sec.className = 'filter-menu-section';
+    sec.innerHTML = `<div class="filter-section-label">${title}</div><div class="filter-chips"></div>`;
+    const chipWrap = sec.querySelector('.filter-chips');
+    chips.forEach(({ key, label, set }) => {
+      const chip = document.createElement('div');
+      chip.className = 'filter-chip' + (set.has(key) ? ' active' : '');
+      chip.textContent = label;
+      chip.addEventListener('click', e2 => {
+        e2.stopPropagation();
+        if (set.has(key)) set.delete(key); else set.add(key);
+        chip.classList.toggle('active', set.has(key));
+        updateFilterBtn();
+        render();
+      });
+      chipWrap.appendChild(chip);
+    });
+    return sec;
+  }
+
+  if (uniqueProjects.length) {
+    menu.appendChild(makeSection('Project', uniqueProjects.map(p => ({ key: p, label: p, set: filters.projects }))));
+  }
+
+  menu.appendChild(makeSection('Due Date', [
+    { key: 'overdue', label: 'Overdue',   set: filters.dueDates },
+    { key: 'today',   label: 'Today',     set: filters.dueDates },
+    { key: 'week',    label: 'This week', set: filters.dueDates },
+    { key: 'none',    label: 'No date',   set: filters.dueDates },
+  ]));
+
+  menu.appendChild(makeSection('Priority', [
+    { key: 'high',   label: 'High',   set: filters.priorities },
+    { key: 'medium', label: 'Medium', set: filters.priorities },
+    { key: 'low',    label: 'Low',    set: filters.priorities },
+    { key: 'none',   label: 'None',   set: filters.priorities },
+  ]));
+
+  const footer = document.createElement('div');
+  footer.className = 'filter-menu-footer';
+  const clearBtn = document.createElement('button');
+  clearBtn.className = 'filter-clear-btn';
+  clearBtn.textContent = 'Clear all';
+  clearBtn.addEventListener('click', e2 => {
+    e2.stopPropagation();
+    filters.projects.clear(); filters.dueDates.clear(); filters.priorities.clear();
+    updateFilterBtn();
+    render();
+    menu.remove();
+  });
+  footer.appendChild(clearBtn);
+  menu.appendChild(footer);
+
+  btn.parentElement.style.position = 'relative';
+  btn.parentElement.appendChild(menu);
+  setTimeout(() => document.addEventListener('click', function h() {
+    document.getElementById('filter-menu')?.remove();
     document.removeEventListener('click', h);
   }), 0);
 });
