@@ -447,7 +447,7 @@ input[type="date"].dp-input-sm{color-scheme:light}
 
 /* ── Comment actions ── */
 .comment-acts{display:flex;gap:2px;opacity:0;transition:opacity 0.12s;margin-left:auto;align-items:center}
-.comment-item:hover .comment-acts{opacity:1}
+.comment-item:hover .comment-acts,.reply-item:hover .comment-acts{opacity:1}
 .comment-act{
   height:20px;padding:0 6px;border-radius:4px;border:none;background:transparent;
   font-size:11px;font-weight:600;cursor:pointer;color:var(--text-3);transition:all 0.12s;
@@ -2043,8 +2043,9 @@ function buildCommentMarkup(cmt, card, isReply = false) {
   item.className = (isReply ? 'reply-item' : 'comment-item') + (cmt.author === 'claude' ? ' claude-reply' : '');
   item.dataset.id = cmt.id;
   
-  const time = new Date(cmt.created_at).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
-  
+  const _ts = cmt.created_at.replace(' ', 'T');
+  const time = new Date(_ts.endsWith('Z') ? _ts : _ts + 'Z').toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+
   item.innerHTML = `
     <div class="avatar-${cmt.author === 'claude' ? 'claude' : 'h xs'}">${cmt.author === 'claude' ? '✦' : 'H'}</div>
     <div style="flex:1; min-width:0">
@@ -2052,6 +2053,10 @@ function buildCommentMarkup(cmt, card, isReply = false) {
         <span class="comment-author">${cmt.author === 'claude' ? 'Claude' : 'Hieu'}</span>
         <span class="comment-time">${time}</span>
         ${(!isReply || cmt.author === 'claude') ? `<button class="comment-act reply-btn" style="margin-left:8px">Reply</button>` : ''}
+        <div class="comment-acts">
+          <button class="comment-act edit-btn">Edit</button>
+          <button class="comment-act del delete-btn">Delete</button>
+        </div>
       </div>
       <div class="comment-bubble" style="overflow-wrap: break-word;">${formatComment(cmt.text)}</div>
     </div>
@@ -2060,6 +2065,36 @@ function buildCommentMarkup(cmt, card, isReply = false) {
   if (!isReply || cmt.author === 'claude') {
     item.querySelector('.reply-btn').onclick = () => showReplyInput(item, cmt.id, card, cmt.author);
   }
+
+  item.querySelector('.delete-btn').onclick = async () => {
+    if (!confirm('Delete this comment?')) return;
+    await api(`/comments/${cmt.id}`, 'DELETE');
+    item.remove();
+  };
+
+  item.querySelector('.edit-btn').onclick = () => {
+    const bubble = item.querySelector('.comment-bubble');
+    if (item.querySelector('.comment-edit-input')) return;
+    const ta = document.createElement('textarea');
+    ta.className = 'comment-edit-input';
+    ta.value = cmt.text;
+    const acts = document.createElement('div');
+    acts.className = 'comment-edit-actions';
+    acts.innerHTML = `<button class="pill-btn">Save</button><button class="pill-btn ghost">Cancel</button>`;
+    bubble.replaceWith(ta);
+    ta.after(acts);
+    ta.focus();
+    acts.querySelector('.ghost').onclick = () => { acts.remove(); ta.replaceWith(bubble); };
+    acts.querySelector('.pill-btn:not(.ghost)').onclick = async () => {
+      const txt = ta.value.trim();
+      if (!txt) return;
+      const updated = await api(`/comments/${cmt.id}`, 'PATCH', { text: txt });
+      cmt.text = updated.text;
+      bubble.innerHTML = formatComment(updated.text);
+      acts.remove();
+      ta.replaceWith(bubble);
+    };
+  };
 
   return item;
 }
