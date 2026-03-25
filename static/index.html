@@ -464,7 +464,7 @@ input[type="date"].dp-input-sm{color-scheme:light}
 
 /* ── Sort dropdown ── */
 .sort-menu{
-  position:absolute;top:50px;right:0;min-width:170px;
+  position:absolute;top:calc(100% + 6px);right:0;min-width:170px;
   background:var(--surface);border:1px solid var(--border-2);border-radius:var(--r);
   box-shadow:0 8px 32px rgba(0,0,0,0.12);z-index:300;overflow:hidden;
   animation:fadeDown 0.15s ease;
@@ -1144,8 +1144,8 @@ document.getElementById('btn-sort').addEventListener('click', e => {
     menu.appendChild(item);
   });
 
-  btn.parentElement.style.position = 'relative';
-  btn.parentElement.appendChild(menu);
+  btn.style.position = 'relative';
+  btn.appendChild(menu);
   setTimeout(() => document.addEventListener('click', function h() {
     document.getElementById('sort-menu')?.remove();
     document.removeEventListener('click', h);
